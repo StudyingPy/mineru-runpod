@@ -4,24 +4,11 @@
   "type": "serverless",
   "category": "language",
   "iconUrl": "https://raw.githubusercontent.com/sergeyshmakov/runpod-mineru/main/.runpod/icon.png",
-  "repository": "https://github.com/sergeyshmakov/runpod-mineru",
-  "license": "MIT",
   "config": {
     "runsOn": "GPU",
     "containerDiskInGb": 30,
     "gpuCount": 1,
     "gpuIds": "AMPERE_24,ADA_24,AMPERE_48,ADA_48",
-    "allowedCudaVersions": ["12.4", "12.5", "12.6", "12.8"],
-    "endpointType": "LB",
-    "env": [
-      {
-        "key": "HF_HOME",
-        "value": "/root/.cache/huggingface"
-      },
-      {
-        "key": "TRANSFORMERS_OFFLINE",
-        "value": "0"
-      }
-    ]
+    "allowedCudaVersions": ["12.4", "12.5", "12.6", "12.8"]
   }
 }

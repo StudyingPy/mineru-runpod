@@ -3,19 +3,18 @@
     {
       "name": "parse_one_page_via_volume",
       "input": {
-        "input": {
-          "volume_path": "/worker/test-fixture.pdf",
-          "start_page": 0,
-          "end_page": 0,
-          "return": "tarball_b64",
-          "basename": "smoke"
-        }
+        "volume_path": "/worker/test-fixture.pdf",
+        "start_page": 0,
+        "end_page": 0,
+        "return": "tarball_b64",
+        "basename": "smoke"
       },
       "timeout": 180000
     }
   ],
   "config": {
     "gpuTypeId": "NVIDIA GeForce RTX 4090",
-    "gpuCount": 1
+    "gpuCount": 1,
+    "allowedCudaVersions": ["12.4", "12.5", "12.6", "12.8"]
   }
 }
