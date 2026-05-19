@@ -1,0 +1,80 @@
+---
+title: runpod-mineru
+description: Serverless MinerU 2.5 PDF parser on RunPod. Scales to zero, ~$0.0001 per page.
+template: splash
+hero:
+  title: Serverless MinerU 2.5, $0.0001 per page
+  tagline: Drop-in PDF → Markdown / JSON service running on RunPod. Scales to zero, idles in seconds, costs cents per document.
+  actions:
+    - text: Get started
+      link: /runpod-mineru/getting-started/overview/
+      icon: right-arrow
+      variant: primary
+    - text: GitHub
+      link: https://github.com/sergeyshmakov/runpod-mineru
+      icon: external
+      variant: minimal
+    - text: MinerU model card
+      link: https://huggingface.co/opendatalab/MinerU2.5-Pro-2604-1.2B
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+## What it is
+
+A generic, reusable [MinerU 2.5](https://github.com/opendatalab/MinerU) PDF-parsing service running on [RunPod Serverless](https://runpod.io?ref=31jdfpnq). One Docker image, three input transports (URL / base64 / mounted volume), two output formats (gzipped tarball / inline). Scales to zero between jobs — you pay only for the seconds a worker is actually parsing.
+
+## Why this exists
+
+<CardGrid>
+  <Card title="MinerU 2.5 is SOTA" icon="seti:json">
+    The 1.2B VLM beats much larger general-purpose models on text, formula, table, and reading-order accuracy across 84 languages.
+  </Card>
+  <Card title="Scale to zero" icon="rocket">
+    RunPod bills per-second. With `idle_timeout=10` and FlashBoot, a 100-page document costs roughly $0.01 instead of paying for an always-on GPU.
+  </Card>
+  <Card title="No glue code" icon="puzzle">
+    Push the repo to GitHub → RunPod auto-builds → endpoint id in your `.env` → done. Ten minutes end-to-end.
+  </Card>
+  <Card title="Commercial-clean" icon="approve-check">
+    Apache 2.0 with explicit thresholds (100M MAU, $20M revenue). The only commercially clean GPU-class PDF parser among the open-source options.
+  </Card>
+</CardGrid>
+
+## 30-second taste
+
+```python
+from mineru_client import MineruClient
+
+client = MineruClient(endpoint_id="<your-endpoint-id>")
+result = client.parse_pdf(pdf_url="https://example.com/report.pdf", end_page=4)
+client.save_tarball(result, "./out/doc")
+# → markdown + content_list + middle.json + images
+```
+
+## Next steps
+
+<CardGrid>
+  <Card title="Overview" icon="open-book">
+    What runpod-mineru is, who it's for, and what's in the repo.
+
+    [Overview](/runpod-mineru/getting-started/overview/)
+  </Card>
+  <Card title="GitHub" icon="github">
+    Source, issues, releases. MIT-licensed.
+
+    [sergeyshmakov/runpod-mineru](https://github.com/sergeyshmakov/runpod-mineru)
+  </Card>
+  <Card title="Deploy on RunPod" icon="external">
+    Sign up, fork, and you're parsing PDFs in ten minutes.
+
+    [runpod.io](https://runpod.io?ref=31jdfpnq)
+  </Card>
+  <Card title="Blog" icon="document">
+    Launch posts, what worked, what surprised me.
+
+    [Read the blog](/runpod-mineru/blog/)
+  </Card>
+</CardGrid>

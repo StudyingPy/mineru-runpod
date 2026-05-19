@@ -14,6 +14,7 @@ out/
 examples/
 mineru_client/
 tests/
+docs/
 deploy.py
 destroy.py
 README.md

@@ -1,0 +1,55 @@
+---
+title: Overview
+description: What runpod-mineru is, who it's for, and how it fits into a document pipeline.
+---
+
+`runpod-mineru` is a generic, reusable [MinerU 2.5](https://github.com/opendatalab/MinerU) PDF-parsing service running on [RunPod Serverless](https://runpod.io?ref=31jdfpnq). The repo deliberately knows nothing about any specific downstream system — it ships a worker image, a small Python client, and the deploy / destroy glue. Anything that needs `PDF → structured Markdown + JSON` (a RAG pipeline, a document indexer, an Office-doc archive) calls it the same way.
+
+## What's in the repo
+
+- **`handler.py`** — the serverless worker. Accepts a PDF via URL, base64, or mounted-volume path; calls MinerU's async parse; returns Markdown + `content_list` + `middle.json` + images.
+- **`mineru_client/`** — the Python package consumers import. One class (`MineruClient`), two methods (`parse_pdf`, `parse_pdf_from_file`). Pure-Python; imports nothing GPU- or MinerU-related, so it's safe to depend on from any caller.
+- **`deploy.py` / `destroy.py`** — stand up and tear down the RunPod endpoint from CLI flags. Every dashboard setting is exposed as a flag.
+- **`.runpod/hub.json`** — RunPod Hub listing metadata with three preset configurations (spiky workload, steady throughput, long single jobs).
+- **`examples/`** — `parse_url_example.py`, `parse_b64_example.py`, and a `parser_adapter_example.py` showing how to wrap MinerU output in your own typed domain model.
+
+## Who it's for
+
+| If you're building... | What you get |
+|---|---|
+| **Office document indexing** (Word / PowerPoint / Excel exported to PDF) | Spiky ingest, pay only during bursts; preserves tables + figures |
+| **Document RAG pipelines** | Section-aware chunks with page provenance out of the box |
+| **Contract / spec / standards parsing** | Handles long attribute tables and cross-page constructs |
+| **Invoice / receipt extraction** | Table fidelity + image extraction in one pass |
+| **Multi-language documents** | MinerU 2.5 supports 84 languages, including handwriting |
+
+## Why MinerU + serverless
+
+- **Accuracy.** MinerU 2.5's 1.2B VLM leads the [OmniDocBench](https://github.com/opendatalab/OmniDocBench) leaderboard on text, formula, table, and reading-order metrics — see the [HuggingFace model card](https://huggingface.co/opendatalab/MinerU2.5-Pro-2604-1.2B) and the [technical report](https://arxiv.org/abs/2604.04771).
+- **Economics.** Per-second billing on RunPod with FlashBoot means an idle worker costs nothing. ~$0.0001 per page on a 24 GB Ampere GPU at $0.44/h.
+- **Licensing.** MinerU is Apache 2.0 with explicit commercial thresholds (free below 100M MAU and $20M monthly revenue, with attribution). Among open-source GPU-class PDF parsers, that's the cleanest license for production SaaS use.
+
+## How it compares
+
+| | runpod-mineru | Marker | GROBID | Nougat |
+|---|---|---|---|---|
+| Scale-to-zero | ✅ | ⚠️ possible | ❌ always-on | ❌ |
+| GPU | required | CPU or GPU | CPU | required |
+| Tables | ✅ structured | ⚠️ noisy | ⚠️ refs only | ⚠️ |
+| Equations | ✅ LaTeX | ✅ LaTeX | ❌ | ✅ LaTeX |
+| Multi-lang | ✅ 84 | ⚠️ Latin-heavy | EN only | EN/limited |
+| License | Apache 2.0 + thresholds | **GPL + Rail-M** | Apache 2.0 | MIT code, **CC-BY-NC weights** |
+| Commercial SaaS | ✅ | ⚠️ paid license | ✅ | ❌ blocked |
+
+See the [project README](https://github.com/sergeyshmakov/runpod-mineru#how-does-it-compare) for the source-cited version of this table.
+
+## Next steps
+
+The full deploy walkthrough still lives in the [project README](https://github.com/sergeyshmakov/runpod-mineru#deploy) for now — a dedicated **Deploy** page is coming in the next docs pass. In the meantime:
+
+1. **Sign up for RunPod** via [this referral link](https://runpod.io?ref=31jdfpnq) and add $5 of credit.
+2. **Fork the repo** and let RunPod auto-build the image from your `Dockerfile`.
+3. **Create an endpoint** from the template; grab the endpoint id.
+4. **`pip install`** the client, point it at your endpoint id, and parse your first PDF.
+
+Total wall time: ~10 minutes if RunPod has spare capacity.
