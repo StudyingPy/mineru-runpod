@@ -1,3 +1,10 @@
+## 1.0.0 (2026-05-19)
+
+### Features
+
+* **docs:** scaffold Astro + Starlight site with launch blog post ([aaeaa27](https://github.com/sergeyshmakov/runpod-mineru/commit/aaeaa27eed2912928fc068b44b7709842714a482))
+* prepare runpod-mineru for public RunPod Hub launch ([9690fe9](https://github.com/sergeyshmakov/runpod-mineru/commit/9690fe9956665dfe0d53cec494c541c1ce5a398e))
+
 # Changelog
 
 All notable changes to this project will be documented in this file.
