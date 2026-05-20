@@ -54,6 +54,7 @@ WORKDIR /worker
 # mineru[core,vllm], which churns through pydantic / opencv / numpy
 # version conflicts with the base image). Negligible image size (~10 MB)
 # in exchange for a meaningful build-time win.
+# hadolint ignore=DL3013
 RUN pip install --no-cache-dir uv
 
 # Install MinerU + RunPod worker SDK. mineru[core,vllm] pulls the VLM-engine
@@ -75,6 +76,7 @@ RUN uv pip install --system --no-cache -r requirements.txt
 # runtime stays in offline mode. Without this inline override the build
 # would fail with LocalEntryNotFoundError (we'd be trying to download with
 # offline mode forced on).
+# hadolint ignore=DL3059
 RUN HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 python3 -c "from huggingface_hub import snapshot_download; \
     snapshot_download(repo_id='opendatalab/MinerU2.5-Pro-2604-1.2B'); \
     snapshot_download(repo_id='opendatalab/PDF-Extract-Kit-1.0')"
