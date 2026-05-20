@@ -163,6 +163,105 @@ def _find_model_dir() -> str | None:
     return str(best)
 
 
+def _probe_filesystem() -> dict[str, Any]:
+    """Inspect /runpod-volume layout for Cached Models debugging.
+
+    Returns whatever's actually on disk where MinerU's HF lookup expects it.
+    Triggered by `probe: true` in the input. Used to diagnose
+    LocalEntryNotFoundError on workers that have Cached Models configured but
+    aren't finding the model.
+
+    Safe to call without MinerU installed. Read-only. No network. No PDF.
+    """
+    def _list(p: Path, max_entries: int = 50) -> list[str] | str:
+        try:
+            entries = sorted(p.iterdir())
+        except (PermissionError, FileNotFoundError) as e:
+            return f"<error: {type(e).__name__}: {e}>"
+        result: list[str] = []
+        for entry in entries[:max_entries]:
+            kind = "d" if entry.is_dir() else "f"
+            try:
+                size = entry.stat().st_size if entry.is_file() else "-"
+            except OSError:
+                size = "?"
+            result.append(f"{kind} {entry.name} {size}")
+        if len(entries) > max_entries:
+            result.append(f"... ({len(entries) - max_entries} more entries elided)")
+        return result
+
+    hf_home = os.environ.get("HF_HOME", "")
+    hub_path = Path(hf_home) / "hub" if hf_home else None
+
+    out: dict[str, Any] = {
+        "env": {
+            "HF_HOME": hf_home,
+            "HF_HUB_CACHE": os.environ.get("HF_HUB_CACHE", ""),
+            "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", ""),
+            "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE", ""),
+            "TRANSFORMERS_CACHE": os.environ.get("TRANSFORMERS_CACHE", ""),
+            "MINERU_MODEL_SOURCE": os.environ.get("MINERU_MODEL_SOURCE", ""),
+            "MINERU_VL_MODEL_NAME": os.environ.get("MINERU_VL_MODEL_NAME", ""),
+        },
+        "paths": {},
+        "models_found": [],
+    }
+
+    for label, path_str in (
+        ("/runpod-volume", "/runpod-volume"),
+        ("/runpod-volume/huggingface-cache", "/runpod-volume/huggingface-cache"),
+        ("/runpod-volume/huggingface-cache/hub", "/runpod-volume/huggingface-cache/hub"),
+        ("HF_HOME", hf_home),
+        ("HF_HOME/hub", str(hub_path) if hub_path else ""),
+    ):
+        if not path_str:
+            out["paths"][label] = "<empty path>"
+            continue
+        p = Path(path_str)
+        if not p.exists():
+            out["paths"][label] = "<not present>"
+            continue
+        if not p.is_dir():
+            out["paths"][label] = "<not a directory>"
+            continue
+        out["paths"][label] = _list(p)
+
+    # Hunt for any `models--*` directories regardless of casing, anywhere
+    # under /runpod-volume up to depth 4. This catches the case where
+    # RunPod populated under a different path than HF_HOME/hub.
+    for search_root in ("/runpod-volume",):
+        root = Path(search_root)
+        if not root.is_dir():
+            continue
+        try:
+            for path in root.rglob("models--*"):
+                # Stop if we go deeper than 4 levels
+                try:
+                    rel_depth = len(path.relative_to(root).parts)
+                except ValueError:
+                    continue
+                if rel_depth > 4:
+                    continue
+                snapshots = path / "snapshots"
+                snap_names: list[str] = []
+                if snapshots.is_dir():
+                    try:
+                        snap_names = [d.name for d in snapshots.iterdir() if d.is_dir()][:5]
+                    except OSError:
+                        pass
+                out["models_found"].append({
+                    "path": str(path),
+                    "depth": rel_depth,
+                    "snapshots": snap_names,
+                })
+                if len(out["models_found"]) >= 20:
+                    break
+        except (PermissionError, OSError) as e:
+            out["models_found_error"] = f"{type(e).__name__}: {e}"
+
+    return out
+
+
 # RunPod's gateway caps payloads at 10 MB (/run) and 20 MB (/runsync). The
 # 20 MB ceiling is the largest a caller can realistically send inline; the
 # handler enforces it defensively but oversized requests are normally
@@ -214,6 +313,10 @@ INPUT_SCHEMA: dict[str, dict[str, Any]] = {
     "file_url":       {"type": str,  "required": False, "default": None},
     "file_b64":       {"type": str,  "required": False, "default": None},
     "volume_path":    {"type": str,  "required": False, "default": None},
+    # When `probe` is true the handler skips MinerU entirely and returns a
+    # filesystem dump of /runpod-volume + relevant env vars. Used to debug
+    # RunPod Cached Models setup.
+    "probe":          {"type": bool, "required": False, "default": False},
     "start_page":     {"type": int,  "required": False, "default": 0,
                        "constraints": lambda x: x >= 0},
     "end_page":       {"type": int,  "required": False, "default": -1},
@@ -519,7 +622,26 @@ async def handler(job: dict) -> dict:
     phase_ms: dict[str, int] = {}
     gpu_info = _collect_gpu_info()
     try:
-        cleaned = _validate_input(job.get("input") or {})
+        # Probe mode: bypass MinerU entirely and dump filesystem layout so
+        # we can debug Cached Models setup. Bypass input validation since
+        # a probe request has no file source.
+        raw_input = job.get("input") or {}
+        if raw_input.get("probe") is True:
+            print("[mineru-worker] probe job: dumping filesystem layout", flush=True)
+            probe_data = _probe_filesystem()
+            return {
+                "ok": True,
+                "elapsed_seconds": round(time.monotonic() - started, 2),
+                "mineru_version": MINERU_VERSION,
+                "probe": probe_data,
+                "debug": {
+                    "gpu": gpu_info,
+                    "model_dir": _find_model_dir(),
+                    "phase_ms": phase_ms,
+                },
+            }
+
+        cleaned = _validate_input(raw_input)
 
         # rp_validator gives us strict types; translate the -1 sentinel back
         # to None so MinerU treats it as "until end of document".
