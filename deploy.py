@@ -42,7 +42,7 @@ DEFAULTS = {
     "workers_max": 3,
     "idle_timeout": 10,
     "execution_timeout": 900,
-    "container_disk_gb": 30,
+    "container_disk_gb": 50,
     "flashboot": True,
     "scaler_type": "QUEUE_DELAY",
     "scaler_value": 4,
@@ -138,8 +138,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULTS["container_disk_gb"],
         help=(
             f"per-worker container disk (default: {DEFAULTS['container_disk_gb']} GB). "
-            f"Image bakes ~4 GB of model weights (VLM + pipeline OCR), so the worker "
-            f"image is large; bump if your local cache or temp PDFs push over 30 GB."
+            f"Worker image is ~27 GB (vllm-openai base + ~4 GB of baked MinerU "
+            f"models); 50 GB gives ~23 GB working room for tempfiles + output "
+            f"tarball assembly. Bump higher only if you regularly parse books "
+            f"that produce multi-GB tarballs."
         ),
     )
 
