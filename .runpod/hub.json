@@ -1,0 +1,89 @@
+{
+  "title": "MinerU PDF Parser",
+  "description": "Serverless PDF → Markdown / JSON via MinerU. 3.1.x runtime running the MinerU2.5-Pro-2604-1.2B VLM. Also accepts images (PNG/JPEG/GIF/BMP/TIFF/WebP), DOCX, PPTX, and XLSX. Scales to zero with a 10 s idle window, ~$0.0003 per page on 24 GB Ampere serverless (Flex rate; see runpod.io/pricing). Five MinerU backends (pipeline / vlm-auto / vlm-http-client / hybrid-auto / hybrid-http-client), three input transports (URL / base64 / mounted volume), three output formats (gzipped tarball / inline / S3 presigned URL). Generic document-parsing primitive for RAG and document-context systems.",
+  "type": "serverless",
+  "category": "language",
+  "config": {
+    "runsOn": "GPU",
+    "containerDiskInGb": 50,
+    "gpuCount": 1,
+    "gpuIds": "AMPERE_24,ADA_24,AMPERE_48",
+    "allowedCudaVersions": ["12.8", "12.7", "12.6", "12.5", "12.4", "12.3", "12.2", "12.1"],
+    "env": [
+      {
+        "key": "HF_TOKEN",
+        "input": {
+          "name": "HuggingFace token",
+          "type": "huggingface",
+          "description": "Optional. Only needed if you want to pull gated or private models (e.g. a fine-tune of MinerU on your own corpus). The default model is public.",
+          "required": false
+        }
+      },
+      {
+        "key": "MINERU_MODEL_SOURCE",
+        "input": {
+          "name": "MinerU model source",
+          "type": "string",
+          "description": "Where MinerU pulls weights from. 'huggingface' is the default and works everywhere. 'modelscope' is a faster mirror for users in China. 'local' requires a mineru.json + pre-staged snapshots and is for advanced/offline setups.",
+          "default": "huggingface",
+          "options": [
+            { "label": "HuggingFace (default)", "value": "huggingface" },
+            { "label": "ModelScope (faster in China)", "value": "modelscope" },
+            { "label": "Local (advanced — needs mineru.json)", "value": "local" }
+          ],
+          "advanced": true
+        }
+      },
+      {
+        "key": "MINERU_VL_MODEL_NAME",
+        "input": {
+          "name": "VLM model override",
+          "type": "string",
+          "description": "Override the VLM model name. Currently consumed only by the vlm-http-client and hybrid-http-client backends; the local vlm-auto-engine ignores this and always loads MinerU's library default (MinerU2.5-Pro-2604-1.2B).",
+          "default": "opendatalab/MinerU2.5-Pro-2604-1.2B",
+          "advanced": true
+        }
+      },
+      {
+        "key": "BUCKET_ENDPOINT_URL",
+        "input": {
+          "name": "S3 endpoint URL (optional)",
+          "type": "string",
+          "description": "Endpoint URL for an S3-compatible bucket. Required only if callers will request `return: \"s3\"` in their jobs. Works with AWS S3, Cloudflare R2, Backblaze B2, Hetzner, MinIO, etc. Example: https://<account>.r2.cloudflarestorage.com",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "BUCKET_NAME",
+        "input": {
+          "name": "S3 bucket name (optional)",
+          "type": "string",
+          "description": "Name of the S3-compatible bucket to upload to. Required only if callers will request `return: \"s3\"`.",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "BUCKET_ACCESS_KEY_ID",
+        "input": {
+          "name": "S3 access key ID (optional)",
+          "type": "string",
+          "description": "Access key ID for the S3-compatible bucket. Required only if callers will request `return: \"s3\"`. Stored as a worker env var; not exposed to job inputs or outputs.",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "BUCKET_SECRET_ACCESS_KEY",
+        "input": {
+          "name": "S3 secret access key (optional)",
+          "type": "string",
+          "description": "Secret access key for the S3-compatible bucket. Required only if callers will request `return: \"s3\"`. Stored as a worker env var; not exposed to job inputs or outputs.",
+          "default": "",
+          "advanced": true
+        }
+      }
+    ]
+  }
+}
