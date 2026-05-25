@@ -1,3 +1,9 @@
+## [1.1.25](https://github.com/sergeyshmakov/mineru-runpod/compare/v1.1.24...v1.1.25) (2026-05-25)
+
+### Bug Fixes
+
+* trying to fix runpod hub workflow ([62ca5ec](https://github.com/sergeyshmakov/mineru-runpod/commit/62ca5ec3c1a5f5dccd3705260d2464bc983ac9d5))
+
 ## [1.1.24](https://github.com/sergeyshmakov/mineru-runpod/compare/v1.1.23...v1.1.24) (2026-05-24)
 
 ### Bug Fixes
