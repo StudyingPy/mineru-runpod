@@ -18,3 +18,10 @@ httpx>=0.27
 # Only imported lazily inside the s3 code path, so a worker without S3
 # env vars never touches it.
 boto3>=1.35
+
+# Xet storage backend client used by huggingface_hub for chunk-based
+# parallel downloads. Auto-detected when installed; the Dockerfile bake
+# step sets HF_XET_HIGH_PERFORMANCE=1 to saturate bandwidth and CPU
+# during the model snapshot pull. Replaces the deprecated hf_transfer.
+# Runtime stays offline so this is build-time only.
+hf-xet>=1.0

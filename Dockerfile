@@ -63,20 +63,34 @@ RUN uv pip install --system --no-cache -r requirements.txt
 # Bake both MinerU model dependencies into the image at /root/.cache/huggingface
 # (HF's default cache path). Runs AFTER pip install so huggingface_hub is
 # available, and BEFORE the handler.py COPY so iterating on handler code
-# doesn't bust this ~4 GB layer.
+# doesn't bust these layers.
 #
 # - MinerU2.5-Pro-2604-1.2B: the VLM backend's model
 # - PDF-Extract-Kit-1.0: the pipeline backend's OCR + layout + formula +
 #   table models
 #
-# HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are set to "0" inline for this RUN
-# step only — the image-wide ENV directive above keeps them at "1" so that
-# runtime stays in offline mode. Without this inline override the build
-# would fail with LocalEntryNotFoundError (we'd be trying to download with
-# offline mode forced on).
+# Split into two RUN layers (one per model) so a partial failure or a
+# bump to a single model only re-downloads that model, not both. The
+# ~30-minute RunPod build ceiling makes this resilience valuable.
+#
+# HF_XET_HIGH_PERFORMANCE=1 tells the Xet backend (hf-xet, pinned in
+# requirements.txt) to saturate the build node's network bandwidth and
+# CPU cores during the snapshot pull. Replaces the now-deprecated
+# HF_HUB_ENABLE_HF_TRANSFER flag — Hugging Face has moved all transfers
+# to the Xet storage backend, so hf_transfer is no longer used.
+#
+# HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are set to "0" inline for these
+# RUN steps only — the image-wide ENV directive above keeps them at "1"
+# so that runtime stays in offline mode. Without this inline override
+# the build would fail with LocalEntryNotFoundError (we'd be trying to
+# download with offline mode forced on).
 # hadolint ignore=DL3059
-RUN HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 python3 -c "from huggingface_hub import snapshot_download; \
-    snapshot_download(repo_id='opendatalab/MinerU2.5-Pro-2604-1.2B'); \
+RUN HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 HF_XET_HIGH_PERFORMANCE=1 \
+    python3 -c "from huggingface_hub import snapshot_download; \
+    snapshot_download(repo_id='opendatalab/MinerU2.5-Pro-2604-1.2B')"
+# hadolint ignore=DL3059
+RUN HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 HF_XET_HIGH_PERFORMANCE=1 \
+    python3 -c "from huggingface_hub import snapshot_download; \
     snapshot_download(repo_id='opendatalab/PDF-Extract-Kit-1.0')"
 
 # Copy the worker code last so iterating on it doesn't bust the pip or
