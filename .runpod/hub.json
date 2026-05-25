@@ -84,6 +84,80 @@
           "default": "",
           "advanced": true
         }
+      },
+      {
+        "key": "MINERU_MAX_CONCURRENCY",
+        "input": {
+          "name": "Max concurrent jobs per worker",
+          "type": "string",
+          "description": "Concurrent jobs per worker. Default 1 is safe everywhere. See the scaling guide before raising on smaller GPUs.",
+          "default": "1",
+          "advanced": true
+        }
+      },
+      {
+        "key": "REFRESH_WORKER_AFTER_JOBS",
+        "input": {
+          "name": "Refresh worker after N jobs",
+          "type": "string",
+          "description": "Recycle the worker after this many successful jobs to release VRAM fragmentation. 0 (default) disables.",
+          "default": "0",
+          "advanced": true
+        }
+      },
+      {
+        "key": "REFRESH_WORKER_AFTER_PAGES",
+        "input": {
+          "name": "Refresh worker after N cumulative pages",
+          "type": "string",
+          "description": "Recycle the worker after this many cumulative pages. 0 (default) disables. Only bounded page slices contribute.",
+          "default": "0",
+          "advanced": true
+        }
+      },
+      {
+        "key": "LOG_FORMAT",
+        "input": {
+          "name": "Worker log format",
+          "type": "string",
+          "description": "Worker log output format. JSON is easier to filter in dashboards; text is human-readable for local development.",
+          "default": "json",
+          "options": [
+            { "label": "JSON (default)", "value": "json" },
+            { "label": "Text (human-readable)", "value": "text" }
+          ],
+          "advanced": true
+        }
+      },
+      {
+        "key": "MINERU_PROCESSING_WINDOW_SIZE",
+        "input": {
+          "name": "MinerU pipeline batch window (pages)",
+          "type": "string",
+          "description": "Pages per pipeline batch window. Lower reduces VRAM, higher trades VRAM for throughput. Pipeline backend only. Empty = default 64.",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "MINERU_PDF_RENDER_TIMEOUT",
+        "input": {
+          "name": "MinerU PDF render timeout (seconds)",
+          "type": "string",
+          "description": "Seconds before MinerU kills a hung PDF page render. Raise for very complex PDFs. Empty = default 300.",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "MINERU_PDF_RENDER_THREADS",
+        "input": {
+          "name": "MinerU PDF render threads",
+          "type": "string",
+          "description": "CPU threads for PDF rasterization. Raise on high-vCPU pods for image-heavy PDFs. Empty = default 4.",
+          "default": "",
+          "advanced": true
+        }
       }
     ]
   }

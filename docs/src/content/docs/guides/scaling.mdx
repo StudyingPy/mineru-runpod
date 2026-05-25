@@ -1,0 +1,130 @@
+---
+title: Scaling and tuning
+description: Worker-level knobs for concurrency, memory hygiene, and MinerU's own performance tuning. All are env vars on your RunPod endpoint, not per-request fields.
+---
+
+This page collects the worker-level tuning knobs — the things you set
+once on the endpoint, not per request. For per-request options (backend
+selection, page range, output format), see [API reference](/mineru-runpod/reference/api/).
+
+All values listed here are set as **environment variables on the
+RunPod endpoint**, not in the job payload. You'll find them under the
+endpoint's *Environment Variables* section in the RunPod dashboard, or
+as `env` entries in `deploy.py` if you use that.
+
+## Concurrency
+
+`MINERU_MAX_CONCURRENCY` controls how many jobs a single worker
+handles in parallel. Default `1`.
+
+| Value | When to use |
+|---|---|
+| `1` *(default)* | Safe on every supported GPU type. Each worker handles one job at a time; concurrency comes from running more workers. |
+| `2-3` | Only on **≥24 GB GPUs** with the `vlm-auto-engine` backend, or on **any GPU** with the `pipeline` backend. Watch VRAM via `nvidia-smi` or the `gpu.memory` fields in worker logs before raising. |
+
+MinerU's own `mineru-api` server defaults this to `3`, but that's a
+guidance value tuned for their full-fat hosted setup — for a generic
+serverless template across all of RunPod's GPU pool, `1` is the safe
+baseline.
+
+**Why not just always run higher concurrency?** MinerU's VLM backend
+wraps vLLM, which pre-allocates a large KV cache at engine init. Two
+concurrent jobs share that cache; on a 16 GB GPU you OOM around 2
+concurrent VLM parses. The pipeline backend is more frugal but still
+bound by per-page VRAM. See [Choosing a GPU](/mineru-runpod/guides/choosing-gpu/)
+for the memory math.
+
+## Worker recycling
+
+Long-lived workers accumulate VRAM fragmentation and Python heap growth
+from MinerU + vLLM. After hundreds of parses, the same job may run
+noticeably slower than on a fresh worker. Two thresholds opt into
+automatic recycling:
+
+| Env var | What | When to set |
+|---|---|---|
+| `REFRESH_WORKER_AFTER_JOBS` | Recycle after this many successful jobs | High-throughput workloads with many small documents. Try `100` if you notice gradual slowdown. |
+| `REFRESH_WORKER_AFTER_PAGES` | Recycle after this many cumulative pages parsed | Mixed workloads where job count is misleading (some 1-page, some 100-page). Try `5000`. |
+
+Both default to `0` (disabled). When a threshold crosses, the worker
+attaches `refresh_worker: true` to the response — RunPod's runtime
+then kills the worker after the response is delivered. The **next**
+request lands on a fresh worker (with a cold-start cost; pair with
+[FlashBoot](#flashboot) to keep that cheap).
+
+### Counter rules
+
+- **Both thresholds active**: whichever trips first wins.
+- **Unbounded parses** (`end_page=-1`, the default): contribute 1 to
+  the jobs counter and **0 to the pages counter**. Use the jobs
+  threshold if you mostly do full-document parses.
+- **Errors and probes**: don't increment either counter. Recycling is
+  for memory hygiene, not error recovery.
+
+## FlashBoot
+
+RunPod's FlashBoot feature snapshots the worker container so the next
+cold start skips the slow parts. Enable it on the endpoint config
+(default on for templates deployed from the Hub).
+
+The MinerU model is loaded at worker boot, before FlashBoot snapshots
+the container — so a FlashBoot-enabled endpoint avoids the ~60-90s
+model-load tax on every cold start. Without FlashBoot, expect 90-130s
+cold-start latency for the VLM backend.
+
+If your cold starts are still slow with FlashBoot on, check the worker
+logs — the `warmup` log line should appear during boot. If it doesn't,
+the image may have been built without the warmup step.
+
+## MinerU performance knobs
+
+These pass straight through to MinerU's own configuration. Leave
+empty to use MinerU's defaults.
+
+| Env var | MinerU default | Description |
+|---|---|---|
+| `MINERU_PROCESSING_WINDOW_SIZE` | `64` | Pages per pipeline batch window. Lower (`32`) reduces peak VRAM on long documents; higher (`128`) trades VRAM for throughput. **Only affects the `pipeline` backend.** |
+| `MINERU_PDF_RENDER_TIMEOUT` | `300` | Seconds before MinerU kills a hung PDF page render. Raise for very complex PDFs (`600`). |
+| `MINERU_PDF_RENDER_THREADS` | `4` | CPU threads for PDF page rasterization. Scale up on workers with more vCPUs (`8` on 16-vCPU pods) for image-heavy PDFs. |
+
+For the `hybrid-http-client` backend specifically, MinerU exposes one
+more knob: `MINERU_HYBRID_BATCH_RATIO` (defaults to ~4) for VRAM
+reduction. Only relevant if you're pointing the worker at an external
+vLLM server with limited VRAM.
+
+## Worker logs
+
+`LOG_FORMAT` selects the worker's log output:
+
+- `json` *(default)* — one JSON object per line, with a `job_id` field
+  on every emission for cross-job correlation. Easier to filter in
+  RunPod's log viewer, CloudWatch, Loki, or Axiom.
+- `text` — human-readable, key=value pairs after the message. Useful
+  for local development with `runpod.serverless.start` running on your
+  laptop.
+
+See [Troubleshooting → reading worker logs](/mineru-runpod/guides/troubleshooting/#reading-worker-logs) for the field reference.
+
+**Two caveats** for production deployments:
+
+- **Throttling**: RunPod drops logs from workers producing too much
+  output. The worker's defaults (~4 lines per job) are well under any
+  practical ceiling, but verbose forks may lose data.
+- **No external shipping**: RunPod does not forward logs to external
+  systems. The dashboard retains endpoint logs for 90 days; worker-level
+  logs disappear when the worker terminates. For durable / queryable
+  logs in Axiom, Honeycomb, etc., the worker must push them — this is
+  what the planned OTel integration does (item 8 in the runtime
+  improvements plan).
+
+## Summary
+
+| Knob | Default | Most common use |
+|---|---|---|
+| `MINERU_MAX_CONCURRENCY` | `1` | Bump to `2-3` only on ≥24 GB GPUs |
+| `REFRESH_WORKER_AFTER_JOBS` | `0` (off) | Set to `100`+ if workers slow down over time |
+| `REFRESH_WORKER_AFTER_PAGES` | `0` (off) | Alternative to jobs threshold for mixed workloads |
+| `LOG_FORMAT` | `json` | Switch to `text` for local dev |
+| `MINERU_PROCESSING_WINDOW_SIZE` | MinerU default (`64`) | Lower if OOM on long docs (pipeline backend) |
+| `MINERU_PDF_RENDER_TIMEOUT` | MinerU default (`300` s) | Raise for very complex PDFs |
+| `MINERU_PDF_RENDER_THREADS` | MinerU default (`4`) | Raise on high-vCPU pods for image-heavy PDFs |

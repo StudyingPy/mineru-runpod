@@ -39,18 +39,8 @@ What to look at:
 | `phase_ms.fetch_input` | If hundreds of seconds on a `file_url` job, the source URL is slow / failing |
 | `phase_ms.mineru_parse` | Per-page guidance for warm workers, **highly GPU- and content-dependent**: MinerU upstream cites **~0.5 s/page (2.12 fps) on an A100** for the VLM backend; we measured a range of **~1 s/page on uniform multi-page reports up to ~10 s/page on dense financial forms** on an A5000 24 GB (≈3.5 s/page is a reasonable single-number estimate) under the default `gpu_memory_utilization=0.5`. Pipeline backend is ~3–5 s/page across GPUs (CPU-bound for layout, GPU-bound only for OCR). **First call on a fresh worker is much higher** (model load + vLLM warmup adds ~90–130 s for the VLM backend). If a warm-worker call is 5× the expected per-page number for your GPU and content type, you're memory-bound and vLLM is swapping |
 
-The worker also prints two lines to stdout — visible in RunPod's worker logs:
-
-```
-[mineru-worker] starting job: backend=vlm-auto-engine lang=en start=0 end=4 gpu=NVIDIA RTX 4090 cc=8.9
-[mineru-worker] done: elapsed=18.4s phase_ms={'fetch_input': 12, 'mineru_parse': 18420, 'package': 95} model_dir=/root/.cache/huggingface/hub/.../snapshots/<hash>
-```
-
-On failure:
-
-```
-[mineru-worker] failed: ValueError: input bytes do not match any supported format
-```
+The worker also emits structured log lines visible in RunPod's worker
+log viewer — see [reading worker logs](#reading-worker-logs) below.
 
 ## Hub build keeps failing with "Pod could not be created"
 
@@ -189,6 +179,81 @@ Most common reasons:
 - **Client-side**: pass a larger `timeout` to `parse_document(timeout=3600, ...)`
 - **Endpoint-side**: bump `--execution-timeout` in `deploy.py` (defaults to 900 s). Use `--execution-timeout 3600` for full books.
 - **Per-page math (warm worker, GPU- and content-dependent)**: MinerU upstream cites ~0.5 s/page for the VLM backend on an A100. We measured **~1–10 s/page on an A5000 24 GB depending on content density** (uniform multi-page reports run fast; dense financial forms run slow). Pipeline ≈ 3–5 s/page across GPUs. A 1000-page book on pipeline = ~3000–5000 s; on VLM-on-A5000 ≈ ~1000–10000 s depending on content; on VLM-on-A100 ≈ ~500 s. **Add 90–130 s for the first call on a cold worker if VLM** (model load + vLLM warmup) — the cold-start tax is paid once per worker, not per page.
+
+## Reading worker logs
+
+The worker emits one JSON object per line by default (set `LOG_FORMAT=text`
+for human-readable output during local development). RunPod's log viewer
+shows them as-is. To filter in CloudWatch, Loki, Axiom, or any other JSON
+log sink, key off the `level`, `msg`, and any of the structured fields.
+
+Typical lines on a successful job:
+
+```json
+{"ts":"2026-05-25T18:30:42.103Z","level":"info","logger":"mineru-worker","msg":"starting job","job_id":"queued-uuid-abc","backend":"vlm-auto-engine","lang":"en","start_page":0,"end_page":4,"gpu_name":"NVIDIA RTX 4090","compute_capability":"8.9"}
+{"ts":"2026-05-25T18:30:48.612Z","level":"info","logger":"mineru-worker","msg":"done","job_id":"queued-uuid-abc","elapsed_seconds":6.51,"phase_ms":{"fetch_input":12,"mineru_parse":6420,"package":79},"model_dir":"/root/.cache/huggingface/hub/.../snapshots/<hash>","refresh_worker":false}
+```
+
+On failure:
+
+```json
+{"ts":"2026-05-25T18:30:42.789Z","level":"error","logger":"mineru-worker","msg":"job failed","job_id":"queued-uuid-abc","error_type":"ValueError","error_message":"input bytes do not match any supported format","phase_ms":{"fetch_input":8}}
+```
+
+Key fields:
+
+| Field | Meaning |
+|---|---|
+| `level` | `debug`, `info`, `warning`, `error` |
+| `logger` | Always `mineru-worker` for handler emissions |
+| `msg` | Stable identifier for the event — safe to alert on |
+| `job_id` | RunPod's job UUID. Use this to correlate all lines from one request, especially when a worker handles multiple jobs in sequence. `<unknown>` when a sync caller submitted without a queued ID |
+| `phase_ms` | Per-phase timings (`fetch_input`, `mineru_parse`, `package`) |
+| `backend`, `lang`, `start_page`, `end_page` | Echoed from the job input — handy for correlating with the request |
+| `refresh_worker` | `true` if the worker is recycling after this job ([scaling guide](/mineru-runpod/guides/scaling/#worker-recycling)) |
+
+:::caution[Log throttling]
+RunPod's logging system throttles workers that produce too much output
+("logs may be throttled and dropped to prevent system overload" —
+[RunPod docs](https://docs.runpod.io/serverless/development/logs)). The
+worker's default emissions (a few lines per job) stay well below that
+ceiling. If you fork and add verbose per-page logging, expect dropped
+lines under load. RunPod also doesn't forward logs to external systems
+— if you need durable / queryable logs in Axiom or similar, the worker
+itself must push them (planned for the [observability guide](/mineru-runpod/guides/troubleshooting/) once
+the OTel integration ships).
+:::
+
+## Cancellation and worker recycling
+
+**Symptom**: a job appears in RunPod's queue, then disappears from the
+worker logs mid-parse with no `done` line.
+
+**Cause**: RunPod sent SIGTERM to the worker — either because the
+endpoint scaled down due to idle timeout, you triggered a recycle from
+the dashboard, or the worker requested a refresh via the `refresh_worker`
+response flag.
+
+When SIGTERM arrives, the worker logs:
+
+```json
+{"ts":"...","level":"warning","logger":"mineru-worker","msg":"sigterm received, draining current job"}
+```
+
+**What gets honored**:
+- Cancellations **between** request phases (`fetch_input` → `parse` → `package`).
+  The next phase check raises `RuntimeError: worker shutting down` and the
+  job returns `ok: false` with that error.
+- The graceful drain handled by RunPod's SDK on currently-in-flight jobs.
+
+**What does NOT get honored**:
+- Cancellation **mid-`aio_do_parse`**. The vLLM forward pass is a
+  blocking GPU call from asyncio's point of view; interrupting it would
+  corrupt the engine state. The worker finishes the current document
+  even after SIGTERM, then exits cleanly.
+
+If you need hard cancellation guarantees mid-parse, that's an upstream
+MinerU feature request, not a template-level fix.
 
 ## Getting more help
 

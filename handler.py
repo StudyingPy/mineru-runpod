@@ -6,6 +6,7 @@ The pieces this orchestrates live in the worker/ package:
   worker.parse    — MinerU lazy import + async parse call
   worker.package  — tarball / inline / s3 response packaging
   worker.debug    — GPU info, model dir, /runpod-volume probe
+  worker.logging  — JSON / text structured logging
 
 The module surface (``handler.MAX_INLINE_FILE_MB``, ``handler._detect_format``,
 ``handler._validate_input``, ``handler._package_tarball``, etc.) is preserved
@@ -14,7 +15,10 @@ for tests/back-compat — see the re-exports near the bottom of this file.
 
 from __future__ import annotations
 
+import os
+import signal
 import tempfile
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -24,10 +28,119 @@ import runpod
 
 from worker import debug as _debug
 from worker import io as _io
+from worker import logging as _logging
 from worker import package as _package
 from worker import parse as _parse
 from worker import schema as _schema
 
+
+logger = _logging.get_logger("mineru-worker")
+
+
+# -----------------------------------------------------------------------------
+# Graceful shutdown
+# -----------------------------------------------------------------------------
+#
+# RunPod sends SIGTERM when recycling a worker (idle timeout, refresh, manual
+# stop). The SDK already drains in-flight jobs, but the user-visible signal
+# tends to be "worker logs go silent." We install a breadcrumb handler + a
+# shutdown event that the handler checks between phases — so a request that's
+# between fetch_input and parse can bail out instead of consuming GPU time
+# that's about to be killed anyway. Mid-parse cancellation is NOT possible
+# (vLLM forward pass is a blocking GPU call from asyncio's POV).
+
+_shutting_down = threading.Event()
+
+
+def _on_sigterm(signum: int, frame: Any) -> None:  # noqa: ARG001
+    logger.warning("sigterm received, draining current job")
+    _shutting_down.set()
+
+
+# Install at module init. RunPod's SDK may install its own handler when
+# runpod.serverless.start() runs; in that case our handler is replaced and
+# this becomes a no-op breadcrumb that never fires. Acceptable — failure is
+# silent and the rest of the worker is unaffected.
+try:
+    signal.signal(signal.SIGTERM, _on_sigterm)
+except (ValueError, OSError) as e:  # pragma: no cover — non-main-thread case
+    logger.warning("could not install sigterm handler", extra={"error": repr(e)})
+
+
+def _check_shutdown() -> None:
+    """Raise if SIGTERM has been received. Called between request phases."""
+    if _shutting_down.is_set():
+        raise RuntimeError("worker shutting down, refusing further work")
+
+
+# -----------------------------------------------------------------------------
+# Cumulative refresh counters
+# -----------------------------------------------------------------------------
+#
+# Recycle this worker after N cumulative jobs or M cumulative pages so that
+# MinerU + vLLM accumulated VRAM fragmentation gets released. Opt-in via env
+# vars; both default to 0 (disabled). When a threshold trips, the handler
+# attaches `refresh_worker: True` to the response — RunPod's SDK then kills
+# the worker after the response is sent.
+#
+# Pages counter only increments when the caller used a bounded slice
+# (end_page >= 0). Full-document parses (end_page=-1, the default) contribute
+# 1 to jobs but 0 to pages — documented in scaling.mdx so operators know to
+# use the jobs counter for unbounded workloads.
+
+_jobs_processed = 0
+_pages_processed_total = 0
+_refresh_lock = threading.Lock()
+
+
+def _refresh_thresholds() -> tuple[int, int]:
+    """Read thresholds from env on every job so they can be tuned without redeploy."""
+    try:
+        jobs = int(os.environ.get("REFRESH_WORKER_AFTER_JOBS", "0"))
+    except ValueError:
+        jobs = 0
+    try:
+        pages = int(os.environ.get("REFRESH_WORKER_AFTER_PAGES", "0"))
+    except ValueError:
+        pages = 0
+    return max(0, jobs), max(0, pages)
+
+
+def _record_job(pages: int) -> bool:
+    """Bump counters; return True if a refresh threshold was crossed.
+
+    ``pages`` is the requested slice size (positive) or 0 for unbounded /
+    unknown — only the jobs counter increments in the unbounded case.
+    """
+    global _jobs_processed, _pages_processed_total
+    with _refresh_lock:
+        _jobs_processed += 1
+        if pages > 0:
+            _pages_processed_total += pages
+        jobs_th, pages_th = _refresh_thresholds()
+        return (jobs_th > 0 and _jobs_processed >= jobs_th) or \
+               (pages_th > 0 and _pages_processed_total >= pages_th)
+
+
+# -----------------------------------------------------------------------------
+# Concurrency
+# -----------------------------------------------------------------------------
+#
+# vLLM pre-allocates a large KV cache and isn't safe to drive from concurrent
+# aio_do_parse calls on smaller GPUs. Default 1 is safe on every supported
+# GPU type. Operators with ≥24 GB GPUs may raise via MINERU_MAX_CONCURRENCY.
+# See guides/scaling.mdx for the VRAM math.
+
+def _concurrency_modifier(current_concurrency: int) -> int:  # noqa: ARG001
+    try:
+        return max(1, int(os.environ.get("MINERU_MAX_CONCURRENCY", "1")))
+    except ValueError:
+        return 1
+
+
+# -----------------------------------------------------------------------------
+# Progress + debug envelope
+# -----------------------------------------------------------------------------
 
 def _maybe_progress(job: dict, data: dict) -> None:
     """Best-effort progress update. Tests / sync clients without a job id
@@ -35,9 +148,7 @@ def _maybe_progress(job: dict, data: dict) -> None:
     try:
         runpod.serverless.progress_update(job, data)
     except Exception as e:  # noqa: BLE001
-        # Leave a breadcrumb in worker logs so a silent failure here is at
-        # least visible during incident debugging.
-        print(f"[mineru-worker] progress_update failed: {e!r}", flush=True)
+        logger.debug("progress_update failed", extra={"error": repr(e)})
 
 
 def _build_debug(phase_ms: dict[str, int], gpu_info: dict[str, Any], **extra: Any) -> dict[str, Any]:
@@ -50,7 +161,7 @@ def _build_debug(phase_ms: dict[str, int], gpu_info: dict[str, Any], **extra: An
 
 
 async def _handle_probe(started: float, gpu_info: dict[str, Any], phase_ms: dict[str, int]) -> dict[str, Any]:
-    print("[mineru-worker] probe job: dumping filesystem layout", flush=True)
+    logger.info("probe job: dumping filesystem layout")
     return {
         "ok": True,
         "elapsed_seconds": round(time.monotonic() - started, 2),
@@ -74,13 +185,19 @@ async def _handle_parse(
     end_page = None if end_page_val is None or end_page_val < 0 else int(end_page_val)
     backend = cleaned["backend"]
 
-    print(
-        f"[mineru-worker] starting job: backend={backend} lang={cleaned['lang']} "
-        f"start={cleaned['start_page']} end={end_page} "
-        f"gpu={gpu_info.get('name', '?')} cc={gpu_info.get('compute_capability', '?')}",
-        flush=True,
+    logger.info(
+        "starting job",
+        extra={
+            "backend": backend,
+            "lang": cleaned["lang"],
+            "start_page": cleaned["start_page"],
+            "end_page": end_page,
+            "gpu_name": gpu_info.get("name"),
+            "compute_capability": gpu_info.get("compute_capability"),
+        },
     )
 
+    _check_shutdown()
     _maybe_progress(job, {"phase": "fetching_input"})
     t = time.monotonic()
     file_bytes, source = await _io.resolve_input_bytes(cleaned)
@@ -95,6 +212,7 @@ async def _handle_parse(
             "file_url returned the file body (not an error page)."
         )
 
+    _check_shutdown()
     _maybe_progress(job, {
         "phase": "parsing",
         "input_bytes": len(file_bytes),
@@ -121,6 +239,7 @@ async def _handle_parse(
         )
         phase_ms["mineru_parse"] = int((time.monotonic() - t) * 1000)
 
+        _check_shutdown()
         _maybe_progress(job, {"phase": "packaging"})
 
         t = time.monotonic()
@@ -134,8 +253,7 @@ async def _handle_parse(
             "ok": True,
             "elapsed_seconds": round(time.monotonic() - started, 2),
             "pages_requested": pages_requested,
-            # Back-compat: older clients read `pages_processed`. Same value.
-            "pages_processed": pages_requested,
+            "pages_processed": pages_requested,  # back-compat alias
             "mineru_version": _parse.MINERU_VERSION,
             "source": source,
         }
@@ -150,10 +268,29 @@ async def _handle_parse(
         response["debug"] = _build_debug(
             phase_ms, gpu_info, backend=backend, input_format=input_format
         )
-        print(
-            f"[mineru-worker] done: elapsed={response['elapsed_seconds']}s "
-            f"phase_ms={phase_ms} model_dir={response['debug']['model_dir']}",
-            flush=True,
+
+        # Cumulative refresh check — outside the lock so logging happens after
+        # the counter bump. Bounded slices contribute their page count;
+        # unbounded ones contribute 0 to the pages tally (jobs still +1).
+        bumped_pages = pages_requested if pages_requested > 0 else 0
+        if _record_job(bumped_pages):
+            response["refresh_worker"] = True
+            logger.info(
+                "refresh threshold crossed; signaling worker recycle",
+                extra={
+                    "jobs_processed": _jobs_processed,
+                    "pages_processed_total": _pages_processed_total,
+                },
+            )
+
+        logger.info(
+            "done",
+            extra={
+                "elapsed_seconds": response["elapsed_seconds"],
+                "phase_ms": phase_ms,
+                "model_dir": response["debug"]["model_dir"],
+                "refresh_worker": response.get("refresh_worker", False),
+            },
         )
         return response
 
@@ -162,6 +299,11 @@ async def handler(job: dict) -> dict:
     started = time.monotonic()
     phase_ms: dict[str, int] = {}
     gpu_info = _debug.collect_gpu_info()
+    # Pin the job id into the logging contextvar so every line emitted
+    # from this request carries `job_id` for correlation (per RunPod's
+    # write-logs guidance). Falls back to "<unknown>" if RunPod doesn't
+    # surface an id (sync clients without a queued job).
+    _logging.job_id_var.set(job.get("id") or "<unknown>")
     try:
         raw_input = job.get("input") or {}
         # Probe mode bypasses schema validation: a probe has no file source
@@ -175,7 +317,14 @@ async def handler(job: dict) -> dict:
     except Exception as exc:  # noqa: BLE001
         # Top-level `error` key tells RunPod to mark this job FAILED.
         # Keep `ok=false` and the structured details so clients see context.
-        print(f"[mineru-worker] failed: {type(exc).__name__}: {exc}", flush=True)
+        logger.error(
+            "job failed",
+            extra={
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "phase_ms": phase_ms,
+            },
+        )
         return {
             "error": f"{type(exc).__name__}: {exc}",
             "ok": False,
@@ -209,4 +358,7 @@ _probe_filesystem = _debug.probe_filesystem
 
 
 if __name__ == "__main__":
-    runpod.serverless.start({"handler": handler})
+    runpod.serverless.start({
+        "handler": handler,
+        "concurrency_modifier": _concurrency_modifier,
+    })

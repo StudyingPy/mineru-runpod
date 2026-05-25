@@ -52,6 +52,7 @@ export default defineConfig({
 						"guides/choosing-gpu",
 						"guides/input-formats",
 						"guides/output-modes",
+						"guides/scaling",
 						"guides/network-volumes",
 						"guides/troubleshooting",
 					],
