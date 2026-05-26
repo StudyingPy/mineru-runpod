@@ -188,6 +188,70 @@
           "default": "en",
           "advanced": true
         }
+      },
+      {
+        "key": "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "input": {
+          "name": "OTLP/HTTP endpoint (telemetry trigger)",
+          "type": "string",
+          "description": "Base URL of an OTLP/HTTP backend (Axiom, Honeycomb, Tempo, etc.). Empty = telemetry off. The SDK appends /v1/traces, /v1/logs, /v1/metrics.",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "OTEL_EXPORTER_OTLP_HEADERS",
+        "input": {
+          "name": "OTLP headers for traces+logs",
+          "type": "string",
+          "description": "Headers sent with traces+logs requests. CSV of key=value pairs. Example for Axiom: Authorization=Bearer xat-...,X-AXIOM-DATASET=my-events",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+        "input": {
+          "name": "OTLP headers for metrics only",
+          "type": "string",
+          "description": "Override headers for metrics export only. Set when your backend uses a separate metrics dataset (e.g. Axiom's x-axiom-metrics-dataset).",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "OTEL_EXPORTER_OTLP_PROTOCOL",
+        "input": {
+          "name": "OTLP transport",
+          "type": "string",
+          "description": "OTLP transport. http/protobuf is widely supported and required by Axiom metrics. Use http/json only if your backend lacks protobuf.",
+          "default": "http/protobuf",
+          "options": [
+            { "label": "http/protobuf (default)", "value": "http/protobuf" },
+            { "label": "http/json", "value": "http/json" }
+          ],
+          "advanced": true
+        }
+      },
+      {
+        "key": "OTEL_SERVICE_NAME",
+        "input": {
+          "name": "OTel service.name",
+          "type": "string",
+          "description": "Service name attached to every signal. Override if you deploy multiple endpoints into one backend and need to tell them apart in queries.",
+          "default": "mineru-runpod",
+          "advanced": true
+        }
+      },
+      {
+        "key": "OTEL_RESOURCE_ATTRIBUTES",
+        "input": {
+          "name": "Extra OTel resource attributes",
+          "type": "string",
+          "description": "Comma-separated extra resource attributes, e.g. deployment.environment=prod,team=ml. Merged with the built-in runpod.* and service.* attrs.",
+          "default": "",
+          "advanced": true
+        }
       }
     ]
   }

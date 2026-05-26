@@ -29,24 +29,26 @@ def reset_counters(monkeypatch):
 # -----------------------------------------------------------------------------
 
 def test_refresh_disabled_by_default():
-    # With no thresholds set, every job returns False (no recycle).
+    # With no thresholds set, every job returns None (no recycle).
     for _ in range(5):
-        assert handler._record_job(10) is False
+        assert handler._record_job(10) is None
 
 
 def test_refresh_jobs_threshold_crosses(monkeypatch):
     monkeypatch.setenv("REFRESH_WORKER_AFTER_JOBS", "3")
-    assert handler._record_job(0) is False
-    assert handler._record_job(0) is False
-    assert handler._record_job(0) is True  # third job crosses
+    assert handler._record_job(0) is None
+    assert handler._record_job(0) is None
+    # Third job crosses the jobs threshold — reason identifies which one.
+    assert handler._record_job(0) == "jobs_threshold"
     assert handler._jobs_processed == 3
 
 
 def test_refresh_pages_threshold_crosses(monkeypatch):
     monkeypatch.setenv("REFRESH_WORKER_AFTER_PAGES", "50")
-    assert handler._record_job(20) is False
-    assert handler._record_job(20) is False  # 40 cumulative
-    assert handler._record_job(20) is True   # 60 cumulative, crosses 50
+    assert handler._record_job(20) is None
+    assert handler._record_job(20) is None  # 40 cumulative
+    # 60 cumulative crosses 50 — pages reason wins.
+    assert handler._record_job(20) == "pages_threshold"
     assert handler._pages_processed_total == 60
 
 
@@ -54,21 +56,29 @@ def test_refresh_unbounded_jobs_do_not_count_pages(monkeypatch):
     # End-page=-1 jobs pass pages=0; jobs counter still increments.
     monkeypatch.setenv("REFRESH_WORKER_AFTER_PAGES", "10")
     monkeypatch.setenv("REFRESH_WORKER_AFTER_JOBS", "2")
-    assert handler._record_job(0) is False  # job count 1, pages 0
-    assert handler._record_job(0) is True   # job count 2, crosses jobs threshold
+    assert handler._record_job(0) is None
+    assert handler._record_job(0) == "jobs_threshold"  # job count 2 crosses
 
 
 def test_refresh_either_threshold_trips(monkeypatch):
     # If BOTH thresholds are set, whichever trips first wins.
     monkeypatch.setenv("REFRESH_WORKER_AFTER_JOBS", "100")
     monkeypatch.setenv("REFRESH_WORKER_AFTER_PAGES", "5")
-    assert handler._record_job(3) is False  # pages 3
-    assert handler._record_job(3) is True   # pages 6, crosses
+    assert handler._record_job(3) is None       # pages 3
+    assert handler._record_job(3) == "pages_threshold"  # pages 6, crosses
+
+
+def test_refresh_jobs_reason_wins_when_both_trip_same_job(monkeypatch):
+    """When jobs AND pages thresholds both trip on the same call, jobs
+    wins deterministically — order matches the env-var documentation."""
+    monkeypatch.setenv("REFRESH_WORKER_AFTER_JOBS", "1")
+    monkeypatch.setenv("REFRESH_WORKER_AFTER_PAGES", "1")
+    assert handler._record_job(5) == "jobs_threshold"
 
 
 def test_refresh_malformed_env_var_treated_as_disabled(monkeypatch):
     monkeypatch.setenv("REFRESH_WORKER_AFTER_JOBS", "not-a-number")
-    assert handler._record_job(0) is False
+    assert handler._record_job(0) is None
 
 
 def test_refresh_worker_signal_via_full_handler_path(monkeypatch):
@@ -142,3 +152,50 @@ def test_on_sigterm_sets_event():
         assert handler._shutting_down.is_set()
     finally:
         handler._shutting_down.clear()
+
+
+# -----------------------------------------------------------------------------
+# Egress sizing helper (feeds the bytes_out_total / output_size_bytes metrics)
+# -----------------------------------------------------------------------------
+
+def test_measure_output_bytes_tarball():
+    """Tarball: the base64 string IS the payload; len() is exact."""
+    response = {"tarball_b64": "QUFB" * 100}  # 400-char b64 string
+    assert handler._measure_output_bytes(response, "tarball_b64") == 400
+
+
+def test_measure_output_bytes_inline_sums_markdown_and_images():
+    """Inline: dominate fields are markdown text + b64 image strings."""
+    response = {
+        "markdown": "# hello\n",  # 8 utf-8 bytes
+        "images": {"page1.png": "A" * 200, "page2.png": "B" * 300},
+        # content_list / middle are ignored — JSON overhead is negligible
+        # compared to the image and markdown payload on real documents.
+        "content_list": [{"foo": "bar"}],
+    }
+    assert handler._measure_output_bytes(response, "inline") == 8 + 500
+
+
+def test_measure_output_bytes_s3_uses_bucket_bytes():
+    """S3: package_s3 records the uploaded tarball size in bucket_bytes."""
+    response = {
+        "tarball_url": "https://example.com/x.tar.gz",
+        "bucket_bytes": 1024 * 1024,
+    }
+    assert handler._measure_output_bytes(response, "s3") == 1024 * 1024
+
+
+def test_measure_output_bytes_empty_response_returns_zero():
+    """A response missing the expected fields shouldn't produce a misleading
+    zero histogram sample — the caller skips the record on out_bytes <= 0."""
+    assert handler._measure_output_bytes({}, "tarball_b64") == 0
+    assert handler._measure_output_bytes({}, "inline") == 0
+    assert handler._measure_output_bytes({}, "s3") == 0
+    assert handler._measure_output_bytes({"random": "shape"}, "unknown") == 0
+
+
+def test_measure_output_bytes_inline_handles_unicode():
+    """Multi-byte chars count as utf-8 bytes, not codepoints."""
+    response = {"markdown": "héllo", "images": {}}
+    # 'h' + 'é' (2 bytes) + 'l' + 'l' + 'o' = 6 utf-8 bytes
+    assert handler._measure_output_bytes(response, "inline") == 6

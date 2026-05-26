@@ -53,6 +53,7 @@ export default defineConfig({
 						"guides/input-formats",
 						"guides/output-modes",
 						"guides/scaling",
+						"guides/observability",
 						"guides/network-volumes",
 						"guides/troubleshooting",
 					],

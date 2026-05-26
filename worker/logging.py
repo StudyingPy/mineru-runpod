@@ -64,10 +64,32 @@ def _format_text(level: str, msg: str, fields: dict[str, Any]) -> str:
 
 def _emit(level: str, msg: str, fields: dict[str, Any]) -> None:
     """Write one log line to stdout. Re-reads LOG_FORMAT each call so it
-    can be flipped at runtime without restarting (mostly useful for tests)."""
+    can be flipped at runtime without restarting (mostly useful for tests).
+
+    When OTel telemetry is active, mirror the same record to the OTLP/HTTP
+    logs exporter. The stdout JSON line fires first so RunPod's dashboard
+    is never gated on the external collector being reachable. Lazy import
+    keeps the no-telemetry codepath free of OTel SDK references.
+    """
     fmt = os.environ.get("LOG_FORMAT", "json").lower()
     line = _format_text(level, msg, fields) if fmt == "text" else _format_json(level, msg, fields)
     print(line, file=sys.stdout, flush=True)
+
+    # Mirror to OTel logs if enabled. The import is local so the
+    # no-telemetry path doesn't pay an import cost on every log line
+    # — the module itself is cheap to import (no OTel SDK touched
+    # until OTEL_EXPORTER_OTLP_ENDPOINT is set).
+    try:
+        from worker import telemetry as _telemetry  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return
+    if _telemetry.is_enabled():
+        # Pass the job_id along as an attribute so the OTel record
+        # carries the same correlation field the stdout JSON has.
+        attrs = dict(fields)
+        if (jid := job_id_var.get()) is not None:
+            attrs.setdefault("job_id", jid)
+        _telemetry.emit_log(level, msg, attrs)
 
 
 def info(msg: str, **fields: Any) -> None:

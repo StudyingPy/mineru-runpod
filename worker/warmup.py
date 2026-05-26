@@ -91,16 +91,29 @@ async def warmup_async() -> None:
     _log(f"starting (backend={backend} lang={lang} fixture={WARMUP_FIXTURE_PATH})")
     start = time.monotonic()
 
-    try:
-        fixture_bytes = WARMUP_FIXTURE_PATH.read_bytes()
-        await _warmup_once(fixture_bytes, backend=backend, lang=lang)
-    except Exception as exc:  # noqa: BLE001
-        elapsed = time.monotonic() - start
-        _log(f"failed after {elapsed:.1f}s: {type(exc).__name__}: {exc}")
-        _log("worker will continue with lazy-load fallback")
-        return
+    # Local import to keep this module light when telemetry isn't wired up
+    # (e.g. some test contexts that import warmup standalone).
+    from worker import telemetry as _telemetry  # noqa: PLC0415
 
-    _log(f"done in {time.monotonic() - start:.1f}s")
+    with _telemetry.span("mineru.warmup", **{"mineru.backend": backend, "mineru.lang": lang}):
+        try:
+            fixture_bytes = WARMUP_FIXTURE_PATH.read_bytes()
+            await _warmup_once(fixture_bytes, backend=backend, lang=lang)
+        except Exception as exc:  # noqa: BLE001
+            elapsed = time.monotonic() - start
+            _telemetry.record_exception(exc)
+            _telemetry.histogram_record(
+                "warmup_duration", elapsed, backend=backend, status="error",
+            )
+            _log(f"failed after {elapsed:.1f}s: {type(exc).__name__}: {exc}")
+            _log("worker will continue with lazy-load fallback")
+            return
+
+        elapsed = time.monotonic() - start
+        _telemetry.histogram_record(
+            "warmup_duration", elapsed, backend=backend, status="ok",
+        )
+        _log(f"done in {elapsed:.1f}s")
 
 
 def warmup() -> None:

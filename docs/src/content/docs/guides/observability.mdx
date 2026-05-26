@@ -1,0 +1,178 @@
+---
+title: Observability
+description: Optional OpenTelemetry export of logs, traces, and metrics from the worker to any OTLP/HTTP backend (Axiom, Honeycomb, Grafana Tempo / Loki, Datadog, Jaeger, or your own collector).
+---
+
+The worker ships with **optional** OpenTelemetry export of logs, traces,
+and metrics. It is **off by default**: until you set
+`OTEL_EXPORTER_OTLP_ENDPOINT` on your endpoint, the OTel SDK is never
+loaded and the worker behaves exactly as it does today (direct-print
+JSON logs to RunPod's dashboard, no spans, no metric flush).
+
+When you turn it on, the OpenTelemetry SDK is configured at worker
+boot to ship to any OTLP/HTTP-compatible backend. The template itself
+is vendor-neutral; the only Axiom-specific recipe lives in
+[the Axiom blog post](/mineru-runpod/blog/otel-mineru-runpod-axiom/).
+
+## What gets emitted
+
+**Traces.** One span per job (`mineru.job`) and one span per phase
+inside it: `mineru.fetch_input`, `mineru.parse`, `mineru.package`. The
+boot-time warmup also gets its own span (`mineru.warmup`). Each span
+carries the relevant attributes — backend, input_format, page range,
+input/output sizes — for ad-hoc analysis.
+
+**Logs.** Every line emitted by the worker's structured logger is
+mirrored to OTLP, additive to the existing stdout JSON. RunPod's
+dashboard remains the source of truth; the mirror lets you query the
+same records from your downstream sink. Each record carries `job_id`
+as an attribute and (when a span is active) the OTel trace and span
+IDs so logs link back to traces in the UI.
+
+**Metrics.** The full catalog below, exported via the OTLP/HTTP
+metric exporter on a 10-second batch interval. All histogram metrics
+use **base-2 exponential bucket aggregation**, not the SDK default of
+explicit (linear) buckets. Latency metrics span ms → minutes and
+byte-size metrics span KB → hundreds of MB; exponential buckets give
+uniform resolution across those ranges without per-metric bucket
+tuning. Any modern OTLP backend (Axiom, Honeycomb, Grafana Mimir,
+Datadog) accepts exponential histograms.
+
+| Metric | Type | Labels | Question it answers |
+|---|---|---|---|
+| `mineru.jobs.total` | counter | `status`, `backend`, `input_format` | How many jobs, what outcome? |
+| `mineru.pages.total` | counter | `backend` | How many pages — the $/page denominator. |
+| `mineru.bytes_in.total` | counter | `source` (`url`/`b64`/`volume`) | Ingest volume by transport. |
+| `mineru.bytes_out.total` | counter | `transport` (`tarball_b64`/`inline`/`s3`) | Egress volume by transport. Inline payloads are approximated as `markdown` text + image bytes (ignoring JSON overhead). |
+| `mineru.errors.total` | counter | `type`, `phase` | What's failing, where? |
+| `mineru.job.duration` | histogram | `backend`, `input_format` | End-to-end wall-clock per job. |
+| `mineru.phase.duration` | histogram | `phase` | Where time goes inside a job. |
+| `mineru.pages_per_second` | histogram | `backend` | Throughput regression detector. |
+| `mineru.input.size_bytes` | histogram | — | Input-size distribution. |
+| `mineru.output.size_bytes` | histogram | `transport` | Output-size distribution. |
+| `mineru.worker.cold_starts.total` | counter | — | Cold-start rate per endpoint. |
+| `mineru.worker.warmup.duration` | histogram | `backend`, `status` (`ok`/`error`) | Boot-time warmup duration. |
+| `mineru.worker.refresh.total` | counter | `reason` (`jobs_threshold`/`pages_threshold`/`sigterm`) | Why workers recycle. |
+| `mineru.worker.jobs_since_boot` | gauge | — | Counts toward `REFRESH_WORKER_AFTER_JOBS`. |
+| `mineru.worker.pages_since_boot` | gauge | — | Counts toward `REFRESH_WORKER_AFTER_PAGES`. |
+| `mineru.gpu.memory_used_bytes` | gauge | `device` | VRAM usage — critical for tuning concurrency. |
+| `mineru.gpu.memory_total_bytes` | gauge | `device` | Constant per pod; enables % math. |
+| `mineru.gpu.utilization_percent` | gauge | `device` | SM utilization. GPU-bound vs CPU-bound. |
+
+**Resource attributes** are attached to every signal (logs, spans,
+metrics):
+
+- `service.name` — `mineru-runpod` by default; override with `OTEL_SERVICE_NAME`
+- `mineru.version` — the MinerU library version baked into the image
+- `runpod.endpoint_id`, `runpod.pod_id`, `runpod.gpu_type`, `runpod.gpu_count` — read from the `RUNPOD_*` env vars RunPod sets on every worker
+
+## How to enable it
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` on your RunPod endpoint to the base
+URL of an OTLP/HTTP collector. That single env var is the trigger —
+without it, the SDK is never initialized.
+
+| Env var | Purpose |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Base URL of your OTLP/HTTP backend. The SDK appends `/v1/traces`, `/v1/logs`, `/v1/metrics` per signal — do not append them yourself. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | CSV of `key=value` headers sent with every export (auth tokens, dataset IDs, etc.). |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` (default) or `http/json`. Some backends require protobuf — see the per-vendor notes. |
+| `OTEL_SERVICE_NAME` | Override the default `mineru-runpod` service name (useful when you run multiple endpoints into the same backend). |
+| `OTEL_RESOURCE_ATTRIBUTES` | Comma-separated extra resource attributes (`deployment.environment=prod,team=ml`). Merged with the built-in attrs. |
+
+These are the standard OpenTelemetry environment variables — every
+OTLP-compatible backend documents them.
+
+### Per-signal overrides
+
+OTel lets you route each signal type — traces, logs, metrics —
+through a different endpoint, protocol, or set of headers. Override
+on a per-signal basis with:
+
+- `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `..._HEADERS` / `..._PROTOCOL`
+- `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` / `..._HEADERS` / `..._PROTOCOL`
+- `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` / `..._HEADERS` / `..._PROTOCOL`
+
+The common case where this matters: a backend stores metrics in a
+different dataset (or bucket, or stream) than traces and logs, and the
+auth header has to identify which. The worker exposes one specific
+override in its hub.json — `OTEL_EXPORTER_OTLP_METRICS_HEADERS` — but
+all of the standard OTel per-signal env vars are read by the SDK
+directly, so you can set them in your endpoint config and they take
+effect immediately.
+
+The base `OTEL_EXPORTER_OTLP_ENDPOINT` you set will have
+`/v1/traces`, `/v1/logs`, `/v1/metrics` appended per signal
+automatically. **Set the base URL, not the full per-signal path** —
+otherwise the SDK will tack the suffix on a second time and the
+backend will 404.
+
+## Compatible backends
+
+Any OTLP/HTTP collector. Tested or known-compatible:
+
+- **Axiom** — OTLP-native, no agent. See
+  [the dedicated walkthrough](/mineru-runpod/blog/otel-mineru-runpod-axiom/)
+  for endpoint URLs, header layout, and the metrics-dataset gotcha.
+- **Honeycomb** — set `OTEL_EXPORTER_OTLP_ENDPOINT=https://api.honeycomb.io` and `OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=<key>`.
+- **Grafana Tempo / Loki / Mimir** — point at your Grafana Cloud
+  OTLP gateway or self-hosted collector.
+- **Datadog** — via their OTLP intake (requires the dedicated endpoint URL).
+- **Jaeger** — via Jaeger's OTLP receiver.
+- **Any OTel Collector** — point at its OTLP/HTTP receiver and let the
+  collector fan out to whatever downstreams you have configured.
+
+If you write up a recipe for a backend not listed here, send a PR
+adding it as a blog post (one post per vendor, please — this guide
+stays vendor-neutral).
+
+## Performance notes
+
+Enabling OTel adds **~200-500 ms** to cold start (one-time SDK init
+plus the first export of resource attributes). Subsequent FlashBoot
+restores on the same host inherit the warm state from the process
+snapshot, so the cold-start cost only shows up on first-ever boots
+and image rebuilds.
+
+The batch span / log / metric processors flush every **500 ms**
+(spans, logs) or every **10 s** (metrics) with a small in-memory
+queue, so per-request latency overhead is negligible — the export
+happens off the request path. If your collector is unreachable, the
+SDK retries with exponential backoff and drops batches that age out;
+the worker continues serving requests either way.
+
+## Failure modes
+
+**Bad endpoint URL or auth.** The SDK logs `Transient error
+HTTPConnectionPool(...)` to stderr (visible in RunPod's logs) and
+retries. The worker stays healthy and continues serving — the
+stdout-JSON log channel is unaffected.
+
+**Collector goes down mid-job.** Same behavior as above. In-flight
+batches retry until they age out of the queue; new batches keep
+flowing. Logs in RunPod's dashboard are unaffected (additive mirror,
+not replacement).
+
+**OTel SDK init crashes.** The worker logs
+`[mineru-telemetry] init failed, continuing without OTel: ...` to
+stdout and proceeds to serve traffic without telemetry. This is
+deliberate — a misconfigured exporter must never block worker boot.
+
+**Missing dependencies.** The container always ships with the OTel
+packages installed; forks that strip them will fall into the "init
+crashes" path above (telemetry simply stays disabled). The worker
+still serves requests.
+
+## Reading worker logs
+
+Independent of OpenTelemetry, the worker emits structured JSON to
+stdout on every log line — see
+[Troubleshooting → Reading worker logs](/mineru-runpod/guides/troubleshooting/#reading-worker-logs)
+for the schema and field reference. The OTel logs export above
+mirrors those records to your OTLP backend; the stdout JSON is
+always the primary channel and remains queryable through RunPod's
+log viewer regardless of whether OTel is enabled.
+
+Set `LOG_FORMAT=text` on the endpoint for a human-readable single-line
+format instead of JSON — useful for local development, less useful
+once you're shipping to an indexed sink.

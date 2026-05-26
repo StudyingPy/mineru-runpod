@@ -1,0 +1,176 @@
+---
+title: "Ship MinerU on RunPod logs to Axiom via OpenTelemetry"
+description: "How to ship MinerU on RunPod worker logs, traces, and metrics into Axiom via OpenTelemetry. Env vars, dataset layout, the metrics gotcha."
+date: 2026-05-26
+authors: sergei
+tags:
+  - OpenTelemetry
+  - Axiom
+  - RunPod
+  - Serverless
+  - Observability
+  - OTLP
+---
+
+*Last Updated: 2026-05-26*
+
+If you're running a serverless worker on RunPod, you can't ssh in to read logs and you can't run a sidecar agent — the worker scales to zero between jobs. You need to ship logs and metrics off the box during the request lifetime, on the worker's own time. The mineru-runpod template includes an OpenTelemetry exporter for exactly this, and [Axiom](https://axiom.co/) is the sink I picked for my own deployment.
+
+This post is the exact env-var layout. If you use a different OTLP backend (Honeycomb, Grafana, Datadog, Jaeger, your own [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/)), the [observability guide](/mineru-runpod/guides/observability/) covers the vendor-neutral setup; come back here only for the Axiom-specific values.
+
+Setup time from a fresh Axiom account to logs flowing: ~10 minutes, dominated by waiting for the worker's next cold start.
+
+## Why use Axiom for serverless worker observability?
+
+Axiom ingests OTLP/HTTP directly, charges per event rather than per host, and has no agent to install — which matters when your workers scale to zero between jobs. For a mineru-runpod deployment processing a few hundred PDFs a day, the events fit inside Axiom's free tier, and the metrics dataset is queryable via APL.
+
+Three concrete reasons it fits this workload:
+
+- **OTLP-native ingest.** No collector to run inside the container, no daemonset, no Fluentbit config. The mineru-runpod worker calls `https://api.axiom.co/v1/logs` directly via the OpenTelemetry Python SDK. The serverless model rules out anything that needs a long-running sidecar, so "the exporter IS the integration" is the only model that works.
+- **Per-event pricing instead of per-host.** A worker serving 500 PDFs a day emits roughly 5,000 log records and 2,500 spans. That fits comfortably inside Axiom's free 0.5 GB/month tier. Per-host pricing models (the Datadog and NewRelic shape) penalize the ephemeral-worker pattern.
+- **APL reads like SPL.** Axiom Processing Language sits between Splunk SPL and KQL ergonomically. Filter by attribute, group by backend, drill into a span: the queries you actually run during an incident are easy in APL. No tutorial needed if you've used either.
+
+I have no affiliation with Axiom. They're the backend I picked for my own deployment after looking at Honeycomb, Grafana Cloud, and self-hosted Jaeger.
+
+## How do I create Axiom datasets for OpenTelemetry?
+
+Create two datasets in the Axiom UI: one for events (traces + logs) and one for metrics. Axiom routes the three signal types into different storage formats, and metrics in particular need their own dataset to show up in the metrics view. Naming convention I use: `mineru-events` and `mineru-metrics`.
+
+1. Sign in to Axiom and go to **Datasets** → **New dataset**.
+2. Name the first one `mineru-events`. This will hold traces and logs.
+3. Create a second dataset called `mineru-metrics`. This one is metrics-only.
+
+You can technically point all three signals at one dataset, but Axiom's metrics view requires the metrics-dataset storage format. Splitting them is the path of least resistance.
+
+Names are arbitrary — substitute whatever fits your naming convention. I prefix everything with the service name so multiple endpoints (staging, prod, experiments) don't collide in queries.
+
+## How do I generate an Axiom API token for OTLP ingest?
+
+In the Axiom UI, go to **Settings → API tokens → Generate new token**. Give it ingest scope on both datasets created in the previous step. Copy the resulting `xat-` prefixed string and paste it into your RunPod endpoint config in the next section. Tokens are scoped per-dataset, so re-generate later if you add more datasets to the same workspace.
+
+The token format starts with `xat-` followed by a long random string. Treat it like any production secret: paste it only into RunPod's **Environment Variables** UI (which encrypts at rest), never check it into git, and rotate when employees with access leave.
+
+If your Axiom workspace is in the EU region, your token works against `https://api.eu.axiom.co` instead of the US default. Same format, different base URL — keep track of which region the token belongs to.
+
+## What environment variables ship RunPod worker telemetry to Axiom?
+
+Set four environment variables on your RunPod endpoint: `OTEL_EXPORTER_OTLP_ENDPOINT` (the Axiom base URL), `OTEL_EXPORTER_OTLP_HEADERS` (auth + events dataset), `OTEL_EXPORTER_OTLP_METRICS_HEADERS` (auth + metrics dataset with the lowercase header), and `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`. The metrics-headers variable is the one that catches everyone — Axiom uses a different header key for metrics than for traces and logs.
+
+Paste this into your endpoint's **Environment Variables** section in the RunPod dashboard, substituting your token and dataset names:
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=https://api.axiom.co
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer xat-YOUR-TOKEN,X-AXIOM-DATASET=mineru-events
+OTEL_EXPORTER_OTLP_METRICS_HEADERS=Authorization=Bearer xat-YOUR-TOKEN,x-axiom-metrics-dataset=mineru-metrics
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+```
+
+Three details that trip people up:
+
+**Base URL, not the full path.** Set the endpoint to `https://api.axiom.co`, not `https://api.axiom.co/v1/traces`. The [OpenTelemetry Python SDK](https://opentelemetry-python.readthedocs.io/en/latest/exporter/otlp/otlp.html) appends `/v1/traces`, `/v1/logs`, `/v1/metrics` per signal automatically. If you set the full path, the SDK double-appends and Axiom returns 404. EU customers use `https://api.eu.axiom.co`.
+
+**Header case differs by signal.** The events-dataset header is `X-AXIOM-DATASET` (uppercase, hyphenated). The metrics-dataset header is `x-axiom-metrics-dataset` (lowercase). This is the most common "why don't my metrics show up?" trap. If you copy the events headers into `OTEL_EXPORTER_OTLP_METRICS_HEADERS` as-is, your metrics land in the events dataset and Axiom's metrics view shows nothing.
+
+**Protocol must be protobuf for metrics.** Axiom's metrics ingest accepts only protobuf, not JSON. The `http/protobuf` value above is the default the SDK ships with; don't override it to `http/json` thinking it's the safer choice. JSON works for logs and traces but quietly drops metrics.
+
+Save the variables, redeploy any active workers (or wait for the next cold start), and Axiom should see records within ~60 seconds of the first request that hits a warm worker. The metric reader flushes every 10 s; traces and logs flush every 500 ms.
+
+## How do I verify OpenTelemetry data is reaching Axiom?
+
+Send one request to the worker, then check three views in the Axiom UI: **Stream** on the events dataset for logs, **Traces** for one trace per job with child spans, and **Metrics** on the metrics dataset for the catalog. If traces and logs land but metrics don't, the metrics-headers env var is almost certainly wrong.
+
+In the Axiom UI:
+
+- **Stream** view → set dataset = `mineru-events` → you should see JSON log records flowing as soon as the worker handles a request. Each carries `service.name=mineru-runpod`, `runpod.endpoint_id=<your-endpoint>`, and `job_id` for correlation.
+- **Traces** view → one trace per RunPod job. The root span is `mineru.job`. Its children are `mineru.fetch_input`, `mineru.parse`, and `mineru.package`. The `mineru.warmup` span shows up once per worker boot.
+- **Metrics** view → set dataset = `mineru-metrics` → after the first 10-second flush you should see `mineru.jobs.total`, `mineru.job.duration`, the GPU memory gauges, and the rest of the [metric catalog](/mineru-runpod/guides/observability/#what-gets-emitted).
+
+If logs and traces land but the metrics view is empty: check `OTEL_EXPORTER_OTLP_METRICS_HEADERS` for the lowercase `x-axiom-metrics-dataset` header. That's the single most common failure mode and I've personally hit it twice.
+
+## Which APL queries help debug a mineru-runpod worker?
+
+APL queries against the events dataset answer the three operational questions that come up most: which errors fired in the last hour, which parses are slowest, and how throughput breaks down by backend or endpoint. The queries below are starter templates — adjust attribute paths to match how your Axiom workspace unrolls OTLP resource and span attributes.
+
+**Recent errors, grouped by error type:**
+
+```apl
+['mineru-events']
+| where ['service.name'] == "mineru-runpod"
+| where ['severity_text'] == "ERROR"
+| where _time > ago(1h)
+| summarize count() by tostring(['attributes.error_type'])
+| sort by count_ desc
+```
+
+**Slowest parses in the last hour:**
+
+```apl
+['mineru-events']
+| where ['name'] == "mineru.parse"
+| where _time > ago(1h)
+| project _time, duration = ['duration'], backend = ['attributes.mineru.backend'], input_format = ['attributes.mineru.input_format']
+| sort by duration desc
+| take 20
+```
+
+**Throughput by endpoint over time:**
+
+```apl
+['mineru-events']
+| where ['name'] == "mineru.job"
+| where _time > ago(24h)
+| summarize jobs = count() by endpoint_id = tostring(['resource.runpod.endpoint_id']), bin(_time, 5m)
+| render timechart
+```
+
+Attribute paths in APL depend on how Axiom unrolls OTLP records — `['resource.runpod.endpoint_id']` works in my workspace but yours may need `['runpod.endpoint_id']` directly. Run a quick `| take 5 | project *` against the dataset first to see the actual field names your workspace produces.
+
+## Does enabling OpenTelemetry slow down cold starts?
+
+Enabling OTel adds roughly 200–500 ms to the first-ever cold start (one-time SDK init plus DNS resolution for the OTLP endpoint). Subsequent FlashBoot snapshot restores on the same host inherit the warm state, so the cost amortizes per host, not per request. For a parse that takes 5–30 seconds wall-clock, the overhead is invisible.
+
+The numbers from my own deployment: on an RTX 4090 with `vlm-auto-engine`, the bare cold start is ~110 s (image pull + vLLM init + model load + warmup parse). OTel init adds 200–500 ms on top of that. On a FlashBoot-restored boot, the same overhead is 0 — the snapshot captures the initialized SDK along with the rest of the process state. See the [FlashBoot mechanism investigation](/mineru-runpod/blog/runpod-flashboot-mechanism-investigation/) for how the snapshot path actually works.
+
+If you're cost-sensitive about cold starts and don't need observability on every deployment, leave `OTEL_EXPORTER_OTLP_ENDPOINT` unset. The mineru-runpod worker skips the OTel SDK import entirely when that variable is empty — zero overhead, zero behavior change. Flip it on for the endpoints where you actually want the visibility (production, staging) and leave it off for experimentation runs.
+
+## Where does this setup fall down?
+
+Three real limitations: Axiom's free tier caps ingest at 0.5 GB/month and 30-day retention; the GPU gauges emit one time series per device label per metric and cardinality adds up; and OTLP/HTTP export adds modest latency on cold starts (200–500 ms). None of these are blockers for a small or mid-volume serverless deployment, but they're the things to watch as volume grows.
+
+**Free-tier ceilings.** Axiom's free plan is generous (0.5 GB ingest/month, 30-day retention) but you can blow through it with a chatty worker. A debug-logging worker processing 1,000 PDFs/day at ~30 KB of logs per parse hits ~900 MB/month — past the cap. Either keep the log level at `info` (the default) or move to Axiom's paid tier (currently $25/month for 5 GB ingest).
+
+**Metric cardinality.** The GPU gauges (`mineru.gpu.memory_used_bytes`, `mineru.gpu.utilization_percent`) emit one time series per `device` label per gauge per worker. A multi-GPU worker times multiple worker instances times four GPU metrics multiplies fast. Axiom's metrics pricing is per-event rather than per-series, so this is a "watch the bill" concern rather than a hard limit. If you scale to dozens of concurrent workers, drop the device label or sample less frequently.
+
+**Cold-start latency.** OTel init adds 200–500 ms on first-ever boot. For most workloads this is dominated by the existing ~110 s of vLLM init, so it doesn't matter. If you're optimizing the cold start specifically (chatbot-style low-latency workloads, for example), benchmark with and without OTel before committing.
+
+**Logs are mirrored, not exclusive.** The worker still writes stdout JSON to RunPod's dashboard regardless of OTel. That's deliberate: RunPod's UI remains a working fallback when the OTel pipeline misbehaves. The cost is paying twice for log storage if you care about long retention in both places. Most teams don't, and the duplication is the price of the dashboard fallback.
+
+## FAQ
+
+### Does Axiom support OpenTelemetry natively?
+
+Yes. Axiom ingests OTLP/HTTP traces, logs, and metrics on `/v1/traces`, `/v1/logs`, `/v1/metrics` paths under `https://api.axiom.co` (US) or `https://api.eu.axiom.co` (EU). The OpenTelemetry Python SDK in the mineru-runpod worker speaks this directly with no Collector or agent in between. See [Axiom's OpenTelemetry docs](https://axiom.co/docs/send-data/opentelemetry) for the full list of supported signals and headers.
+
+### Why aren't my metrics showing up in Axiom?
+
+Eight times out of ten: `OTEL_EXPORTER_OTLP_METRICS_HEADERS` is set to the events headers (`X-AXIOM-DATASET=...`) instead of the metrics headers (`x-axiom-metrics-dataset=...`). The dataset key is different — lowercase, hyphenated, with `-metrics-dataset` in the name. The other 20% of the time: `OTEL_EXPORTER_OTLP_PROTOCOL` is set to `http/json` and Axiom's metrics endpoint accepts only protobuf.
+
+### What's the cheapest way to observe a RunPod serverless worker?
+
+For ≤1,000 jobs/day with structured logs at `info` level, Axiom's free tier (0.5 GB/month, 30-day retention) is the cheapest path with real query power. The OTel SDK is already in the mineru-runpod image; setup is four env vars on the endpoint. RunPod's own log dashboard is free but lacks query language, metrics, and traces — fine for triage, not for SLO tracking.
+
+### Can I send traces and logs to one Axiom dataset and metrics to another?
+
+Yes, and that's the configuration this post documents. `OTEL_EXPORTER_OTLP_HEADERS` controls the default for all signals; `OTEL_EXPORTER_OTLP_METRICS_HEADERS` overrides only the metrics export. Axiom's metrics view requires the metrics-dataset storage format, so the split isn't optional if you want the metrics tab to work — keep events and metrics in separate Axiom datasets.
+
+### How much does OTLP/HTTP export add to cold start time?
+
+200–500 ms on the first-ever cold start of a worker on a host. That's one-time SDK init and DNS resolution for the OTLP endpoint. Subsequent FlashBoot snapshot restores on the same host pay zero overhead — the initialized SDK is captured in the process snapshot. On a baseline 110 s cold start (vLLM + model load + warmup), the OTel cost is invisible.
+
+### Does enabling OpenTelemetry require an OpenTelemetry Collector?
+
+No. The mineru-runpod worker uses the OpenTelemetry Python SDK with the OTLP/HTTP exporter, talking directly to Axiom's ingest endpoint. A Collector is useful when you want to fan out to multiple backends, apply sampling rules, or buffer locally — none of which apply to a single-sink serverless worker shipping into Axiom.
+
+## Same template, different backend
+
+The four env vars above are the only Axiom-specific configuration in this whole setup. Swap the URL and headers and the mineru-runpod worker ships the same logs, traces, and metrics to anything that speaks OTLP/HTTP — Honeycomb, Grafana Cloud, Datadog's OTLP intake, your own OpenTelemetry Collector. The [observability guide](/mineru-runpod/guides/observability/) covers the vendor-neutral env-var layout and the metric catalog. Different backends, same template.

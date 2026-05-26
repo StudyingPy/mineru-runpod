@@ -25,3 +25,20 @@ boto3>=1.35
 # during the model snapshot pull. Replaces the deprecated hf_transfer.
 # Runtime stays offline so this is build-time only.
 hf-xet>=1.0
+
+# OpenTelemetry stack. Dormant unless OTEL_EXPORTER_OTLP_ENDPOINT is set
+# in the worker environment — worker/telemetry.py reads that env var and
+# only imports the SDK / configures exporters when it is non-empty. So
+# these packages add ~30 MB to the image but cost zero overhead at
+# runtime for the default no-telemetry path. See docs/.../observability.mdx.
+# Forks that never want OTel can drop these four lines without other code
+# changes.
+opentelemetry-api>=1.27,<2
+opentelemetry-sdk>=1.27,<2
+opentelemetry-exporter-otlp-proto-http>=1.27,<2
+# nvidia-ml-py is the upstream-maintained successor to pynvml; we keep
+# the `import pynvml` call shape since both packages register the same
+# top-level module. Pinned explicitly here so the Dockerfile install
+# layer doesn't depend on vllm's transitive pull. Powers the
+# mineru.gpu.* gauges in worker/telemetry.py.
+nvidia-ml-py>=12
