@@ -1,3 +1,9 @@
+## [1.2.3](https://github.com/sergeyshmakov/mineru-runpod/compare/v1.2.2...v1.2.3) (2026-05-25)
+
+### Bug Fixes
+
+* bump cuda ([2e4411e](https://github.com/sergeyshmakov/mineru-runpod/commit/2e4411e1562d804ad7798fe163d3db672f7263db))
+
 ## [1.2.2](https://github.com/sergeyshmakov/mineru-runpod/compare/v1.2.1...v1.2.2) (2026-05-25)
 
 ### Bug Fixes
