@@ -1,3 +1,9 @@
+## [1.6.0](https://github.com/sergeyshmakov/mineru-runpod/compare/v1.5.1...v1.6.0) (2026-05-28)
+
+### Features
+
+* add transport + formats fields and unify response shape ([5fd5a8f](https://github.com/sergeyshmakov/mineru-runpod/commit/5fd5a8f9aac0498d508e57b537b54e087d3121b7))
+
 ## [1.5.1](https://github.com/sergeyshmakov/mineru-runpod/compare/v1.5.0...v1.5.1) (2026-05-27)
 
 ### Bug Fixes
