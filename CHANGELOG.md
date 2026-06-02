@@ -1,3 +1,9 @@
+## [1.6.3](https://github.com/sergeyshmakov/mineru-runpod/compare/v1.6.2...v1.6.3) (2026-06-02)
+
+### Bug Fixes
+
+* **hub:** switch test GPU to A40 ([dbad547](https://github.com/sergeyshmakov/mineru-runpod/commit/dbad54764d9c15b6b93cb7f3825d4acda2532641))
+
 ## [1.6.2](https://github.com/sergeyshmakov/mineru-runpod/compare/v1.6.1...v1.6.2) (2026-06-02)
 
 ### Bug Fixes
