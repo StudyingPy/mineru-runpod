@@ -128,7 +128,4 @@ Stop targeting a contended pool. Switch `gpuTypeId` to a higher-availability GPU
 
 The error is annoying but harmless once you know it's capacity and not your build. For a Serverless worker, a commit re-rolls it; for a Hub template, a Release does. If it persists, it's a pool-availability problem, and the fix lives in your GPU choice, not your Dockerfile. The full set of Hub build failures (this one, the CUDA floor mismatch, and the 30-minute build timeout) is catalogued in the [troubleshooting guide](/mineru-runpod/guides/troubleshooting/).
 
-If this saved you a debugging session, the easiest way to say thanks is [signing up for RunPod through this link](https://runpod.io?ref=31jdfpnq). Star the [repo on GitHub](https://github.com/sergeyshmakov/mineru-runpod) for updates.
-
-* * *
-<small><strong>Disclosure:</strong> the RunPod link above uses a referral code that credits me at no cost to you. The post would read the same without it.</small>
+If this saved you a debugging session, star the [repo on GitHub](https://github.com/sergeyshmakov/mineru-runpod) for updates, or open an issue if you hit a build failure that isn't covered here.

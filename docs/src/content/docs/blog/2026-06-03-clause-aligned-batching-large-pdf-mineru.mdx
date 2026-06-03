@@ -75,7 +75,7 @@ The presigned URL has a **1-hour TTL**, which has a real consequence for batchin
 
 ## What GPU and backend, and what did throughput look like?
 
-Backend: `vlm-auto-engine` (MinerU 2.5 Pro, the `MinerU2.5-Pro-2605-1.2B` vision-language model) on a 24 GB AMPERE_24 (RTX A5000-class) serverless GPU. One parse per worker (`MINERU_MAX_CONCURRENCY=1`: vLLM's KV cache isn't safe to drive from concurrent parses on a 24 GB card). For how to pick a card, see [Choosing a GPU](/mineru-runpod/guides/choosing-gpu/).
+Backend: `vlm-auto-engine` (MinerU 2.5 Pro, the `MinerU2.5-Pro-2605-1.2B` vision-language model) on a 24 GB AMPERE_24 (RTX A5000-class) [RunPod](https://runpod.io?ref=31jdfpnq) serverless GPU. One parse per worker (`MINERU_MAX_CONCURRENCY=1`: vLLM's KV cache isn't safe to drive from concurrent parses on a 24 GB card). For how to pick a card, see [Choosing a GPU](/mineru-runpod/guides/choosing-gpu/).
 
 Across the 35 timed batches, total GPU compute was **4,674.8 s (77.9 min)** at an overall **1.04 pages/sec**, with individual batches ranging **0.84–1.27 pp/s** depending on table density. A few representative batches:
 
