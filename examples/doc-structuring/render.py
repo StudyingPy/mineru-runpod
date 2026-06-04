@@ -26,7 +26,10 @@ from typing import Callable
 
 from corrections import apply_corrections
 
-DROP_TYPES = {"page_number", "header"}
+# MinerU block types that are never body content. `aside_text` = margin asides — most
+# often the line-number gutter of a code/schema listing ("82\n83\n…") or a stacked
+# watermark; left in, those numbers land between content blocks as junk lines.
+DROP_TYPES = {"page_number", "header", "aside_text"}
 _FENCE_RE = re.compile(r"^```([^\n]*)\n(.*)\n```\s*$", re.S)
 _NS_TAG_RE = re.compile(r"</?[A-Za-z_][\w.]*:")              # namespaced XML tag <ns:elem>
 _TOC_ITEM_RE = re.compile(r"^\s*(?:[A-Z]\.)?(?:\d+\.)*\d+\s+\S.*?(?:\.{2,}\s*|\s)\d+\s*$")

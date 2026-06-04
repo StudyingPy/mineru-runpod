@@ -29,6 +29,10 @@ class TreeConfig:
     child_line: Callable[[Section], str]         # child section -> one "## Contents" bullet
     is_folder: Callable[[Section], bool] | None = None        # default: has children
     title_line: Callable[[Section], str] | None = None        # default: "# {id} {title}"
+    # optional: a leaf the source gave no content. Its file is NOT written (the parent
+    # barrel still lists it — your `child_line` should render it without a link — and
+    # SectionIndex redirects links to it to the parent barrel).
+    is_empty: Callable[[Section], bool] | None = None
     # optional: mark a section for special-splitting (e.g. an authoritative schema dump).
     # Such a section becomes a folder even with no children, and may ALSO have children.
     is_special: Callable[[Section], bool] | None = None
@@ -64,6 +68,9 @@ def write_tree(roots: list[Section], out_dir: Path, cfg: TreeConfig) -> dict:
             stats["barrels"] += 1
             for c in node.children:
                 emit(c, folder, frel)
+        elif cfg.is_empty and cfg.is_empty(node):
+            stats["omitted"] = stats.get("omitted", 0) + 1   # no file; parent index lists it
+            stats["empty"].append(node.id)
         else:
             body = cfg.render(node, rel)
             (parent_dir / cfg.file_name(node)).write_text(

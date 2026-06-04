@@ -25,21 +25,26 @@ class SectionIndex:
     """
 
     def __init__(self, roots: list[Section], folder_name, file_name, barrel_name,
-                 is_folder: Callable[[Section], bool] | None = None):
+                 is_folder: Callable[[Section], bool] | None = None,
+                 is_empty: Callable[[Section], bool] | None = None):
         self.paths: dict[str, str] = {}
         is_folder = is_folder or (lambda s: s.has_children)
+        is_empty = is_empty or (lambda s: False)
 
-        def walk(node: Section, parent: str) -> None:
+        def walk(node: Section, parent: str, parent_barrel: str) -> None:
             if is_folder(node):
                 folder = f"{parent}/{folder_name(node)}" if parent else folder_name(node)
-                self.paths[node.id] = f"{folder}/{barrel_name(node)}"
+                barrel = f"{folder}/{barrel_name(node)}"
+                self.paths[node.id] = barrel
                 for c in node.children:
-                    walk(c, folder)
+                    walk(c, folder, barrel)
+            elif is_empty(node) and parent_barrel:
+                self.paths[node.id] = parent_barrel       # no file emitted -> link to parent index
             else:
                 self.paths[node.id] = f"{parent}/{file_name(node)}" if parent else file_name(node)
 
         for r in roots:
-            walk(r, "")
+            walk(r, "", "")
 
     def relpath(self, section_id: str, from_dir: str) -> "str | None":
         target = self.paths.get(section_id)

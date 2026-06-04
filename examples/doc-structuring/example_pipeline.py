@@ -38,7 +38,7 @@ from pathlib import Path
 import schema as schemalib
 from model import Section
 from render import RenderConfig, render_blocks, is_noise
-from segment import attach_pages, segment_stream
+from segment import attach_pages, merge_split_headings, segment_stream
 from crosslink import SectionIndex, make_linkifier
 from tree import TreeConfig, write_tree
 from corrections import apply_overlay
@@ -47,6 +47,9 @@ from verify import Vocabulary, check_names, verify_against_pdf
 # Conventions common to numbered technical specs (override for your document if needed).
 STOP = {"the", "a", "an", "of", "and", "for", "to", "in"}
 SECTION_HEAD = re.compile(r"^\s*((?:\d+\.)*\d+|[A-Z](?:\.\d+)+)\.?\s+\S")     # "1.2.3 Title" / "A.4.1 Title"
+BARE_HEAD = re.compile(r"^\s*((?:\d+\.)*\d+|[A-Z](?:\.\d+)+)\.?\s*$")         # a block that is ONLY a section id
+ANNEX_HEAD = re.compile(r"^Annex\s+([A-Z])\b")                                # "Annex B. (informative) …"
+PART_TABLE = re.compile(r"Content Type\(?s?\)?\s*:", re.I)                    # opens each OOXML "Part Summary" entry
 SECTION_REF = re.compile(r"§\s*((?:\d+\.)*\d+|[A-Z](?:\.\d+)+)")             # "§1.2.3" cross-reference
 SCHEMA_XSD = re.compile(r'^\s{0,6}<(?:xsd|xs):(complexType|simpleType|element|group|attributeGroup)\b[^>]*?\bname="([^"]+)"', re.M)
 SCHEMA_RNC = re.compile(r"^([A-Za-z_][\w.]*)\s*=", re.M)
@@ -137,11 +140,22 @@ def load_sections(path: Path):
     for r in rows:
         sid = r.get("id") or r.get("clause")
         by_id[sid] = Section(sid, r.get("title", ""), r.get("page", r.get("page_0based", 0)))
+    def parent_of(sid):
+        cc = comps(sid)
+        for k in range(len(cc) - 1, 0, -1):
+            if cc[0] == "annex":
+                cand = None                                  # "Annex A" is top-level
+            elif k == 1 and len(cc[0]) == 1 and cc[0].isalpha():
+                cand = f"Annex {cc[0].upper()}"              # A.1 -> Annex A, L.4 -> Annex L
+            else:
+                cand = ".".join(cc[:k])                      # 1.2.3 -> 1.2
+            if cand and cand in by_id:
+                return by_id[cand]
+        return None
+
     roots = []
     for sid, node in by_id.items():
-        cc = comps(sid)
-        parent = next((by_id[".".join(cc[:k])] for k in range(len(cc) - 1, 0, -1)
-                       if cc[0] != "annex" and ".".join(cc[:k]) in by_id), None)
+        parent = parent_of(sid)
         (parent.children if parent else roots).append(node)
     for n in by_id.values():
         n.children.sort(key=lambda c: (c.page, comps(c.id)))
@@ -155,6 +169,15 @@ def make_heading_id(valid):
         if t == "code" and not (blk.get("code_body") or "").strip():
             text = text.splitlines()[0] if text else ""
         elif t != "text":
+            return None
+        # Annex top-level heading ("Annex B. (informative) …"): not number-led, so
+        # SECTION_HEAD misses it. Reject the front-matter TOC echo (trailing page number).
+        am = ANNEX_HEAD.match(text)
+        if am:
+            aid = f"Annex {am.group(1)}"
+            if aid in valid and not re.search(r"\d{2,}\s*$", text) and (
+                    blk.get("text_level") or (len(text) <= 90 and not text.endswith((".", ",", ";", ":")))):
+                return aid
             return None
         m = SECTION_HEAD.match(text)
         if not m or m.group(1).rstrip(".") not in valid:
@@ -267,13 +290,43 @@ def main():
             stream += attach_pages(json.loads(Path(f).read_text(encoding="utf-8")), start)
 
     cfg0 = RenderConfig(drop_internal_tocs=True, noise_phrases=(r"table of contents",))
-    segment_stream(stream, by_id, make_heading_id(set(by_id)), is_noise=lambda b: is_noise(b, cfg0))
+    valid = set(by_id)
+
+    def bare_id(text):                       # the block is ONLY a known section id
+        m = BARE_HEAD.match(text)
+        return m.group(1).rstrip(".") if m and m.group(1).rstrip(".") in valid else None
+
+    def title_like(text):                    # the next block reads like a title
+        return (0 < len(text) <= 90 and not text[0].isdigit()
+                and not SECTION_HEAD.match(text) and not text.endswith((".", ",", ";", ":")))
+
+    def natkey(sid):
+        return tuple((0, int(p)) if p.isdigit() else (1, p) for p in comps(sid))
+
+    order = [s.id for s in sorted((n for r in roots for n in r.walk()), key=lambda s: (s.page, natkey(s.id)))]
+
+    def part_boundary(blk, current, nxt):    # OOXML: each Part-Summary entry opens with a "Content Type" table
+        if current is None or not current.blocks or blk.get("type") != "table":
+            return False
+        if not PART_TABLE.search((blk.get("table_body") or "")[:120]):
+            return False
+        cc, nc = comps(current.id), comps(nxt.id)[:-1]
+        return nc in (cc, cc[:-1])           # nxt is a child or a sibling of current
+
+    stream = merge_split_headings(stream, bare_id, title_like)   # repair split "id \n title" headings
+    segment_stream(stream, by_id, make_heading_id(valid), is_noise=lambda b: is_noise(b, cfg0),
+                   order=order, boundary=part_boundary)
 
     auth = schemalib.load_authoritative_decls(sorted(args.xsd.glob("*.zip")) + list(args.xsd.rglob("*.xsd"))
                                               + list(args.xsd.rglob("*.rnc"))) if args.xsd else {"xsd": {}, "rnc": {}}
     is_schema = make_is_schema(bool(args.xsd))
+
+    def is_empty(s):                          # a leaf the source gave no content -> omit its file
+        return (not s.has_children and not is_schema(s)
+                and not render_blocks(s.blocks, RenderConfig(corrections=corrections, attr_only=attr_only)).strip())
+
     index = SectionIndex(roots, folder_name, file_name, barrel_name,
-                         is_folder=lambda s: s.has_children or is_schema(s))
+                         is_folder=lambda s: s.has_children or is_schema(s), is_empty=is_empty)
     misses = []
 
     def child_line(c):
@@ -281,6 +334,8 @@ def main():
         if c.has_children or is_schema(c):
             suffix = f"{len(c.children)} sub-sections" if c.has_children else "schema"
             return f"- [`{c.id}` {desc}]({folder_name(c)}/{barrel_name(c)}) — {suffix}"
+        if is_empty(c):                       # no file emitted -> list without a link
+            return f"- `{c.id}` {desc} — (no content)"
         tag = split_title(c.title)[0]
         return f"- [`{c.id}` {desc}]({file_name(c)}) — {('`'+tag+'`') if tag else 'section'}"
 
@@ -292,8 +347,10 @@ def main():
 
     stats = write_tree(roots, args.out, TreeConfig(
         render=render, folder_name=folder_name, file_name=file_name, barrel_name=barrel_name,
-        child_line=child_line, is_special=is_schema, split_leaf=make_split_leaf(auth, corrections)))
-    print(f"wrote {stats['folders']} folders, {stats['files']} files; {len(misses)} stale patch find(s)")
+        child_line=child_line, is_special=is_schema, split_leaf=make_split_leaf(auth, corrections),
+        is_empty=is_empty))
+    print(f"wrote {stats['folders']} folders, {stats['files']} files "
+          f"({stats.get('omitted', 0)} empty leaves omitted); {len(misses)} stale patch find(s)")
 
     if args.xsd:
         vocab = Vocabulary.from_xsd(sorted(args.xsd.glob("*.zip")) + list(args.xsd.rglob("*.xsd")))
