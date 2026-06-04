@@ -49,7 +49,7 @@ Every fix in [`render.py`](https://github.com/sergeyshmakov/mineru-runpod/blob/m
 - **Code lives in `code_body` (pre-fenced) and `code_caption`, not `text`.** Miss this and all 3,591 XML examples render *empty*.
 - **`[Example: … end example]` markers** have to bracket the code. They routinely land before or inside the fence.
 - **Page-split code halves** (one example broken across a page) sit directly adjacent, so merge them. Genuinely separate examples have prose between them, so they're left alone.
-- **Mislabelled fences** (```txt`/`asp`/`hcl that actually hold XML) get relabelled to ```xml`, but only when the body has namespaced tags, so a text-output example stays text.
+- **Mislabelled fences** (`txt`/`asp`/`hcl` that actually hold XML) get relabelled to `xml`, but only when the body has namespaced tags, so a text-output example stays text.
 - **Tables**: HTML to Markdown. Inline XML examples wrapped as `$<w:…>$` math get deleted by naive tag-stripping unless you protect them. Fully-empty illustration columns get dropped.
 - **Lists**: no doubled bullets (`- - foo`), and ordered items keep their numbers.
 - **A long or sentence-ending `text_level` block is figure text or prose, not a heading.** Don't render it as `##`.
