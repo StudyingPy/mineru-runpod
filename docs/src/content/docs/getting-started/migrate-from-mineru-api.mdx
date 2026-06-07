@@ -139,10 +139,11 @@ The response dicts have the same shape (`{"code": 0, "msg": "ok", "data": {...}}
 
 ## Getting the result: `full_zip_url`
 
-On the SaaS, `full_zip_url` is a CDN `.zip`. Self-hosted, it's a **presigned `.tar.gz`** produced by the worker's `s3` transport. Two things to know:
+`full_zip_url` is a presigned **`.zip`** — the compat client requests `archive_format: "zip"`, so the container matches the official cloud API. One requirement:
 
 - **Your endpoint must have object storage configured.** Set the `BUCKET_*` env vars (`BUCKET_ENDPOINT_URL`, `BUCKET_NAME`, `BUCKET_ACCESS_KEY_ID`, `BUCKET_SECRET_ACCESS_KEY`) on the endpoint — any S3-compatible store (Cloudflare R2, Backblaze B2, MinIO) works. See [Output modes → s3](/mineru-runpod/guides/output-modes/). If they're missing, the task comes back `failed` with an actionable message.
-- **The archive is a `.tar.gz`, not a `.zip`.** `client.download_results(...)` unpacks it for you, so you usually don't need to care. If you fetch `full_zip_url` directly, extract it as a gzipped tarball.
+
+`client.download_results(done, "./out")` fetches and unpacks the archive for you (autodetecting `.zip` vs `.tar.gz`), so you usually don't need to touch the URL directly.
 
 ## Known gaps
 

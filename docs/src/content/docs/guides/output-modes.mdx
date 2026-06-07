@@ -228,6 +228,26 @@ BUCKET_ACCESS_KEY_ID=<application key ID>
 BUCKET_SECRET_ACCESS_KEY=<application key>
 ```
 
+## Archive format (`tar.gz` or `zip`)
+
+The two archive transports — `tarball_b64` and `s3` — default to a `.tar.gz` container. Set `archive_format: "zip"` for a `.zip` instead:
+
+```json
+{
+  "input": {
+    "file_url": "https://example.com/report.pdf",
+    "transport": "s3",
+    "archive_format": "zip"
+  }
+}
+```
+
+- Applies only to `tarball_b64` and `s3` — it's a **no-op** for `inline`.
+- Default `"tar.gz"` preserves the historical behavior, so existing callers are unaffected.
+- The response keys are unchanged (`tarball_b64` / `tarball_url`); only the container differs. For `s3`, the object key extension and Content-Type follow the format (`.tar.gz` + `application/gzip`, or `.zip` + `application/zip`).
+
+The main reason to pick `zip` is drop-in compatibility with the official MinerU cloud API's `full_zip_url` — the [`MineruApiClient`](/mineru-runpod/getting-started/migrate-from-mineru-api/) sets it for you.
+
 ## Picking the right mode
 
 ```mermaid

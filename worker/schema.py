@@ -23,6 +23,12 @@ VALID_BACKENDS = {
     "hybrid-http-client",
 }
 
+# Archive container for the archive transports (tarball_b64, s3). The default
+# preserves historical behavior (.tar.gz); "zip" exists for callers that need a
+# real .zip — e.g. the MinerU-API compat client matching the cloud API's
+# `full_zip_url`. No-op for the inline transport.
+VALID_ARCHIVE_FORMATS = {"tar.gz", "zip"}
+
 
 # rp_validator's `constraints` lambdas are silently ignored on some versions
 # — we declare them anyway for documentation but never rely on them.
@@ -46,6 +52,7 @@ INPUT_SCHEMA: dict[str, dict[str, Any]] = {
     "transport":      {"type": str,  "required": False, "default": "tarball_b64"},
     "formats":        {"type": list, "required": False, "default": list(VALID_FORMATS)},
     "basename":       {"type": str,  "required": False, "default": "doc"},
+    "archive_format": {"type": str,  "required": False, "default": "tar.gz"},
 }
 
 
@@ -105,6 +112,16 @@ def validate_input(job_input: dict) -> dict:
     if transport not in VALID_TRANSPORTS:
         _fail(f"transport must be one of {sorted(VALID_TRANSPORTS)}; got {transport!r}")
     cleaned["transport"] = transport
+
+    # `archive_format` selects the container for the archive transports
+    # (tarball_b64 / s3). Inline ignores it. Default keeps the .tar.gz behavior.
+    archive_format = cleaned.get("archive_format") or "tar.gz"
+    if archive_format not in VALID_ARCHIVE_FORMATS:
+        _fail(
+            f"archive_format must be one of {sorted(VALID_ARCHIVE_FORMATS)}; "
+            f"got {archive_format!r}"
+        )
+    cleaned["archive_format"] = archive_format
 
     cleaned["formats"] = _normalize_formats(cleaned.get("formats"))
 

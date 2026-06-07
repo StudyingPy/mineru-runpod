@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import os
 import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -60,6 +61,7 @@ def test_build_payload_defaults():
         "table_enable": True,
         "lang": "ch",
         "transport": "s3",
+        "archive_format": "zip",
     }
     # page slice omitted when page_ranges is None → worker applies its default
     assert "start_page" not in payload and "end_page" not in payload
@@ -224,6 +226,7 @@ def test_create_task_builds_payload_and_returns_task_id(fake_endpoint):
     assert body["input"]["file_url"] == "https://x/p.pdf"
     assert body["input"]["backend"] == "vlm-auto-engine"
     assert body["input"]["transport"] == "s3"
+    assert body["input"]["archive_format"] == "zip"
     assert body["input"]["start_page"] == 1 and body["input"]["end_page"] == 5
     assert "webhook" not in body
 
@@ -299,6 +302,21 @@ def test_download_results_extracts_tarball(fake_endpoint, tmp_path):
     response = {"data": {"state": "done", "full_zip_url": src.as_uri()}}
     dest = client.download_results(response, tmp_path / "out")
     assert (Path(dest) / "doc.md").read_bytes() == b"# parsed\n"
+
+
+def test_download_results_extracts_zip(fake_endpoint, tmp_path):
+    """The compat client requests .zip, so download_results must unpack a zip
+    (it autodetects the container from the archive's magic bytes)."""
+    src = tmp_path / "out.zip"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w") as zf:
+        zf.writestr("doc.md", "# parsed\n")
+    src.write_bytes(buf.getvalue())
+
+    client = MineruApiClient(endpoint_id="ep-1", api_key="x")
+    response = {"data": {"state": "done", "full_zip_url": src.as_uri()}}
+    dest = client.download_results(response, tmp_path / "out")
+    assert (Path(dest) / "doc.md").read_text() == "# parsed\n"
 
 
 def test_download_results_requires_url(fake_endpoint, tmp_path):

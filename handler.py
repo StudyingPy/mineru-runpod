@@ -327,6 +327,7 @@ async def _handle_parse(
                 basename=cleaned["basename"],
                 source=source,
                 pages_requested=pages_requested,
+                archive_format=cleaned["archive_format"],
             )
         response: dict[str, Any] = {
             "ok": True,
@@ -463,6 +464,7 @@ _package_tarball = _package.package_tarball
 _package_inline = _package.package_inline
 _package_s3 = _package.package_s3
 _build_tarball_bytes = _package._build_tarball_bytes
+_build_zip_bytes = _package._build_zip_bytes
 _run_mineru = _parse.run_mineru
 _collect_gpu_info = _debug.collect_gpu_info
 _find_model_dir = _debug.find_model_dir

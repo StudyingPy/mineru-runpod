@@ -129,6 +129,7 @@ def build_worker_payload(
     page_ranges: str | None = None,
     extra_formats: list[str] | None = None,
     transport: str = "s3",
+    archive_format: str = "zip",
 ) -> dict[str, Any]:
     """Build the worker ``input`` payload from MinerU ``create_task`` params.
 
@@ -148,6 +149,9 @@ def build_worker_payload(
         "table_enable": bool(enable_table),
         "lang": language,
         "transport": transport,
+        # Request a real .zip so full_zip_url matches the official cloud API
+        # (the worker defaults to .tar.gz; the compat client overrides to zip).
+        "archive_format": archive_format,
     }
     if page_ranges is not None:
         start_page, end_page = parse_page_ranges(page_ranges)

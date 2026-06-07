@@ -26,8 +26,9 @@ filtering, the hybrid / http-client backends) use ``MineruClient`` directly.
 Faithfulness notes / known gaps (raise rather than silently mis-parse):
     - model_version 'MinerU-HTML' and extra_formats (docx/html/latex): unsupported.
     - page_ranges: single contiguous 1-based range only ('5' or '2-6').
-    - full_zip_url is a presigned **.tar.gz** (not .zip) and requires the
-      endpoint to be deployed with BUCKET_* env vars (transport='s3').
+    - full_zip_url is a presigned **.zip** (the compat client requests
+      archive_format='zip', matching the cloud API); requires the endpoint to be
+      deployed with BUCKET_* env vars (transport='s3').
     - is_ocr / no_cache / cache_tolerance: accepted but no-op (no worker knob).
     - seed: accepted but unused (RunPod webhooks aren't HMAC-signed).
     - data_id is echoed back from an in-process map; it is not persisted on the
@@ -48,7 +49,33 @@ from ._mapping import (
     build_task_response,
     build_worker_payload,
 )
-from .client import MineruClient, MineruClientError
+from .client import MineruClientError
+
+
+def _download_and_extract(url: str, dest_dir: str | Path) -> Path:
+    """Download an archive URL and extract it, autodetecting `.zip` vs `.tar.gz`.
+
+    The compat client requests `.zip` (to match the cloud API's full_zip_url),
+    but this handles both containers so it works against any worker
+    `tarball_url` regardless of how the task was created. The presigned URL is
+    short-lived — call promptly after the task is ``done``.
+    """
+    import io  # noqa: PLC0415
+    import tarfile  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+    import zipfile  # noqa: PLC0415
+
+    with urllib.request.urlopen(url) as resp:  # noqa: S310 — worker-issued presigned URL
+        data = resp.read()
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    if data[:4] == b"PK\x03\x04":  # zip local-file-header magic
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            zf.extractall(dest)
+    else:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+            tar.extractall(dest)
+    return dest
 
 
 class MineruApiClient:
@@ -142,7 +169,7 @@ class MineruApiClient:
 
         Returns the MinerU envelope with ``data.state`` in
         ``pending | running | done | failed``. On ``done`` the entry carries
-        ``full_zip_url`` (a presigned ``.tar.gz``); on ``failed`` it carries
+        ``full_zip_url`` (a presigned ``.zip``); on ``failed`` it carries
         ``err_msg``.
         """
         if not task_id:
@@ -192,9 +219,10 @@ class MineruApiClient:
         """Download and extract a finished task's archive into ``dest_dir``.
 
         Accepts a ``get_task`` response (preferred — avoids a re-poll) or a bare
-        ``task_id``. The archive behind ``full_zip_url`` is a ``.tar.gz``; this
-        unpacks it so callers don't have to care about the format. The presigned
-        URL is short-lived, so call this promptly after the task is ``done``.
+        ``task_id``. The archive behind ``full_zip_url`` is a ``.zip`` (``.tar.gz``
+        also handled); this unpacks it so callers don't have to care about the
+        format. The presigned URL is short-lived, so call this promptly after
+        the task is ``done``.
         """
         if isinstance(response_or_task_id, str):
             response = self.get_task(response_or_task_id)
@@ -208,6 +236,4 @@ class MineruApiClient:
                 f"no full_zip_url to download (state={data.get('state')!r}); "
                 f"only present when state == 'done'"
             )
-        # full_zip_url is the worker's presigned s3 tarball; reuse the native
-        # client's download+extract path (it handles .tar.gz).
-        return MineruClient.save_s3_tarball({"tarball_url": url}, dest_dir)
+        return _download_and_extract(url, dest_dir)

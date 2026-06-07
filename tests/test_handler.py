@@ -250,3 +250,18 @@ def test_build_tarball_bytes_roundtrip(tmp_path):
         names = set(tar.getnames())
     assert "doc.md" in names
     assert "doc_content_list.json" in names
+
+
+def test_build_zip_bytes_roundtrip(tmp_path):
+    import zipfile  # noqa: PLC0415
+
+    out = tmp_path / "out"
+    out.mkdir()
+    _seed_mineru_output(out, "doc")
+    data = handler._build_zip_bytes(out)
+    assert data[:4] == b"PK\x03\x04"  # zip magic
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = set(zf.namelist())
+    assert "doc.md" in names
+    assert "doc_content_list.json" in names
+    assert "images/fig1.png" in names
