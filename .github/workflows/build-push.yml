@@ -51,8 +51,8 @@ jobs:
         with:
           context: .
           push: true
+          provenance: false
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/mineru-runpod:${{ steps.meta.outputs.tag }}
             ${{ secrets.DOCKERHUB_USERNAME }}/mineru-runpod:latest
-          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/mineru-runpod:buildcache
-          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/mineru-runpod:buildcache,mode=max
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/mineru-runpod:latest
