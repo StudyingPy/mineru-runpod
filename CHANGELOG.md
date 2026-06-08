@@ -1,3 +1,18 @@
+## [1.7.0](https://github.com/sergeyshmakov/mineru-runpod/compare/v1.6.4...v1.7.0) (2026-06-08)
+
+### Features
+
+* **client:** add MinerU API-compatible client (MineruApiClient) ([62cd9b6](https://github.com/sergeyshmakov/mineru-runpod/commit/62cd9b6a769bf86ac261584622890137f353f463))
+* **worker:** add archive_format (tar.gz/zip) for archive transports ([e90d079](https://github.com/sergeyshmakov/mineru-runpod/commit/e90d0790abfb73d1f291dc7a96a5b601ce2de68c))
+
+### Bug Fixes
+
+* **client:** reject MinerU callback param and add archive download timeouts ([68e7193](https://github.com/sergeyshmakov/mineru-runpod/commit/68e719314f2df166391f1e0b3e6b9dcee9cda70f))
+
+### Documentation
+
+* add concurrency guide and fix stale GPU sizing guidance ([da938a4](https://github.com/sergeyshmakov/mineru-runpod/commit/da938a4d306a404a625e9beea6fe4b89d3e60dd5))
+
 ## [1.6.4](https://github.com/sergeyshmakov/mineru-runpod/compare/v1.6.3...v1.6.4) (2026-06-07)
 
 ### Bug Fixes
