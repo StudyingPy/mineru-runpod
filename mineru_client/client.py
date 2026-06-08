@@ -10,6 +10,7 @@ import io
 import json
 import os
 import tarfile
+import zipfile
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
@@ -63,6 +64,26 @@ def _require_http_url(url: str) -> None:
         raise MineruClientError(
             f"refusing to fetch archive from non-HTTP(S) URL (scheme {scheme!r})"
         )
+
+
+def _extract_archive_bytes(data: bytes, dest_dir: str | Path) -> Path:
+    """Extract archive bytes into dest_dir, autodetecting ``.zip`` vs ``.tar.gz``.
+
+    The worker ships either container depending on ``archive_format`` (default
+    ``tar.gz``; ``zip`` when requested), under the same ``tarball_b64`` /
+    ``tarball_url`` keys — so callers can't assume the format. Zip members are
+    sanitized by the stdlib; tar members go through ``_safe_tar_extractall``
+    (CVE-2007-4559 guard). Returns the destination dir.
+    """
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    if data[:4] == b"PK\x03\x04":  # zip local-file-header magic
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            zf.extractall(dest)
+    else:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+            _safe_tar_extractall(tar, dest)
+    return dest
 
 
 class MineruClient:
@@ -257,21 +278,18 @@ class MineruClient:
 
     @staticmethod
     def save_tarball(result: dict[str, Any], dest_dir: str | Path) -> Path:
-        """Extract the tarball_b64 from `result` into dest_dir. Returns the dir.
+        """Extract the ``tarball_b64`` archive from `result` into dest_dir.
 
         Accepts either the full response wrapper or a single result entry.
+        Autodetects the container — ``.tar.gz`` (default) or ``.zip``
+        (``archive_format="zip"``). Returns the dir.
         """
         entry = MineruClient._unwrap(result)
         if "tarball_b64" not in entry:
             raise MineruClientError(
                 "result has no tarball_b64; was transport='tarball_b64'?"
             )
-        dest = Path(dest_dir)
-        dest.mkdir(parents=True, exist_ok=True)
-        raw = base64.b64decode(entry["tarball_b64"])
-        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
-            _safe_tar_extractall(tar, dest)
-        return dest
+        return _extract_archive_bytes(base64.b64decode(entry["tarball_b64"]), dest_dir)
 
     @staticmethod
     def save_s3_tarball(result: dict[str, Any], dest_dir: str | Path) -> Path:
@@ -279,6 +297,7 @@ class MineruClient:
         and extract it into dest_dir. Returns the dir.
 
         Accepts either the full response wrapper or a single result entry.
+        Autodetects the container (``.tar.gz`` or ``.zip``).
 
         The presigned URL expires after ~1 hour; call this promptly after the
         job returns.
@@ -296,11 +315,7 @@ class MineruClient:
             entry["tarball_url"], timeout=_DOWNLOAD_TIMEOUT_SECONDS
         ) as resp:
             data = resp.read()
-        dest = Path(dest_dir)
-        dest.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-            _safe_tar_extractall(tar, dest)
-        return dest
+        return _extract_archive_bytes(data, dest_dir)
 
     @staticmethod
     def save_inline(

@@ -55,8 +55,8 @@ from ._mapping import (
 from .client import (
     _DOWNLOAD_TIMEOUT_SECONDS,
     MineruClientError,
+    _extract_archive_bytes,
     _require_http_url,
-    _safe_tar_extractall,
 )
 
 
@@ -68,25 +68,14 @@ def _download_and_extract(url: str, dest_dir: str | Path) -> Path:
     `tarball_url` regardless of how the task was created. The presigned URL is
     short-lived — call promptly after the task is ``done``.
     """
-    import io  # noqa: PLC0415
-    import tarfile  # noqa: PLC0415
     import urllib.request  # noqa: PLC0415
-    import zipfile  # noqa: PLC0415
 
     _require_http_url(url)
     with urllib.request.urlopen(  # noqa: S310 — scheme checked above
         url, timeout=_DOWNLOAD_TIMEOUT_SECONDS
     ) as resp:
         data = resp.read()
-    dest = Path(dest_dir)
-    dest.mkdir(parents=True, exist_ok=True)
-    if data[:4] == b"PK\x03\x04":  # zip local-file-header magic
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            zf.extractall(dest)
-    else:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-            _safe_tar_extractall(tar, dest)
-    return dest
+    return _extract_archive_bytes(data, dest_dir)
 
 
 class MineruApiClient:

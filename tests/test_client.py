@@ -7,6 +7,7 @@ import io
 import json
 import os
 import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -342,6 +343,28 @@ def test_save_s3_tarball_rejects_non_http_url(tmp_path):
     """A file:// (or other non-HTTP) tarball_url is refused before fetching."""
     with pytest.raises(MineruClientError, match="non-HTTP"):
         MineruClient.save_s3_tarball({"tarball_url": "file:///etc/passwd"}, tmp_path / "out")
+
+
+def test_save_tarball_handles_zip(tmp_path):
+    """save_tarball autodetects a base64 .zip payload (archive_format='zip')."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w") as zf:
+        zf.writestr("doc.md", "# zip\n")
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    dest = MineruClient.save_tarball({"tarball_b64": encoded}, tmp_path / "out")
+    assert (Path(dest) / "doc.md").read_text() == "# zip\n"
+
+
+def test_save_s3_tarball_handles_zip(tmp_path, monkeypatch):
+    """save_s3_tarball autodetects a downloaded .zip (archive_format='zip')."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w") as zf:
+        zf.writestr("doc.md", "# zip\n")
+    _serve(monkeypatch, buf.getvalue())
+    dest = MineruClient.save_s3_tarball(
+        {"tarball_url": "https://bucket.example/out.zip"}, tmp_path / "out"
+    )
+    assert (Path(dest) / "doc.md").read_text() == "# zip\n"
 
 
 def test_save_s3_tarball_passes_a_timeout(tmp_path, monkeypatch):
