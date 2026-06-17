@@ -1,3 +1,30 @@
+## [1.1.0](https://github.com/StudyingPy/mineru-runpod/compare/v1.0.0...v1.1.0) (2026-06-17)
+
+### Features
+
+* **client:** add MinerU API-compatible client (MineruApiClient) ([62cd9b6](https://github.com/StudyingPy/mineru-runpod/commit/62cd9b6a769bf86ac261584622890137f353f463))
+* **worker:** add archive_format (tar.gz/zip) for archive transports ([e90d079](https://github.com/StudyingPy/mineru-runpod/commit/e90d0790abfb73d1f291dc7a96a5b601ce2de68c))
+
+### Bug Fixes
+
+* **client:** reject MinerU callback param and add archive download timeouts ([68e7193](https://github.com/StudyingPy/mineru-runpod/commit/68e719314f2df166391f1e0b3e6b9dcee9cda70f))
+
+### Documentation
+
+* add concurrency guide and fix stale GPU sizing guidance ([da938a4](https://github.com/StudyingPy/mineru-runpod/commit/da938a4d306a404a625e9beea6fe4b89d3e60dd5))
+* add self-host MinerU API blog post ([0d82d9b](https://github.com/StudyingPy/mineru-runpod/commit/0d82d9b7c3d2b2106707dd1fb8d4eb34b4260daf))
+* badge links fix ([f5327c4](https://github.com/StudyingPy/mineru-runpod/commit/f5327c4a957317b723b43b9b4401a021326dd2f0))
+* correct cold-start and model-download claims in self-host post ([7cc8b0d](https://github.com/StudyingPy/mineru-runpod/commit/7cc8b0d01d5cbeadd0593083ac47555a0f25eb1b))
+* drop batch from public docs; document worker-scaling for parallelism ([10ba60e](https://github.com/StudyingPy/mineru-runpod/commit/10ba60e6d1d7fead022ad625039af90d9e0a87b5))
+* fix 404 blog cross-links to use dated slugs ([019c9f5](https://github.com/StudyingPy/mineru-runpod/commit/019c9f53dc96e62a31badfb06f98e7cf9da91b1f))
+* update link titles in docs ([2bd7732](https://github.com/StudyingPy/mineru-runpod/commit/2bd7732de30a0358fc8a6ff4d0ddc7bade2e14e8))
+
+### Build / Deps
+
+* **deps-dev:** bump the npm-development group with 6 updates ([0f41541](https://github.com/StudyingPy/mineru-runpod/commit/0f415419e5b4f457eaff9a9237d53dde85effd01))
+* **deps:** bump the docs-deps group in /docs with 3 updates ([065405a](https://github.com/StudyingPy/mineru-runpod/commit/065405a1a822c2a0965b8963dc377288da3611d6))
+* **deps:** regenerate docs lockfile for astro 6.4.4; bump sharp to 0.34.5 ([1acdef3](https://github.com/StudyingPy/mineru-runpod/commit/1acdef3940bd1feac22126c7ced4f95c9cbc203b))
+
 ## [1.7.0](https://github.com/sergeyshmakov/mineru-runpod/compare/v1.6.4...v1.7.0) (2026-06-08)
 
 ### Features
