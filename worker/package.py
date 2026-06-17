@@ -1,8 +1,11 @@
 """Three ways to ship MinerU's output back to the caller.
 
-- tarball_b64: base64-encoded gzip-tar embedded in the response
+- tarball_b64: base64-encoded archive embedded in the response
 - inline:      markdown + content_list + middle + images embedded directly
-- s3:          tarball uploaded to an S3-compatible bucket, presigned URL returned
+- s3:          archive uploaded to an S3-compatible bucket, presigned URL returned
+
+`archive_format` selects the container for the two archive transports
+(tarball_b64 / s3): "tar.gz" (default) or "zip". Inline ignores it.
 
 `formats` filters the inline payload — callers asking for `["markdown"]` only
 get the markdown key back. For tarball_b64 and s3 the archive is always
@@ -16,6 +19,7 @@ import io
 import json
 import os
 import tarfile
+import zipfile
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -29,9 +33,35 @@ def _build_tarball_bytes(output_dir: Path) -> bytes:
     return buf.getvalue()
 
 
-def package_tarball(output_dir: Path) -> str:
-    """Same archive as _build_tarball_bytes, base64-encoded for JSON transport."""
-    return base64.b64encode(_build_tarball_bytes(output_dir)).decode("ascii")
+def _build_zip_bytes(output_dir: Path) -> bytes:
+    """Zip (DEFLATE) the MinerU output dir; returns the raw bytes.
+
+    Mirrors the file set of `_build_tarball_bytes` in a `.zip` container — used
+    when a caller requests ``archive_format="zip"`` (e.g. the MinerU-API compat
+    client, which needs a `.zip` to match the cloud API's `full_zip_url`).
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for child in sorted(output_dir.rglob("*")):
+            if child.is_file():
+                zf.write(child, arcname=child.relative_to(output_dir).as_posix())
+    return buf.getvalue()
+
+
+def _build_archive_bytes(output_dir: Path, archive_format: str = "tar.gz") -> bytes:
+    """Build the output archive in the requested container ("tar.gz" or "zip")."""
+    if archive_format == "zip":
+        return _build_zip_bytes(output_dir)
+    return _build_tarball_bytes(output_dir)
+
+
+def package_tarball(output_dir: Path, archive_format: str = "tar.gz") -> str:
+    """Base64-encode the output archive for JSON transport.
+
+    ``archive_format`` selects the container ("tar.gz" default, or "zip"); the
+    response key is ``tarball_b64`` regardless.
+    """
+    return base64.b64encode(_build_archive_bytes(output_dir, archive_format)).decode("ascii")
 
 
 def package_inline(
@@ -84,9 +114,13 @@ def package_inline(
 S3_PRESIGN_TTL_SECONDS = 3600
 
 
-def package_s3(output_dir: Path, basename: str) -> dict[str, Any]:
-    """Upload the output tarball to an S3-compatible bucket and return a
+def package_s3(output_dir: Path, basename: str, archive_format: str = "tar.gz") -> dict[str, Any]:
+    """Upload the output archive to an S3-compatible bucket and return a
     presigned GET URL.
+
+    ``archive_format`` selects the container ("tar.gz" default, or "zip"); it
+    sets the object key extension and Content-Type. The response key is
+    ``tarball_url`` regardless of container.
 
     Required worker env vars: BUCKET_ENDPOINT_URL, BUCKET_NAME,
     BUCKET_ACCESS_KEY_ID, BUCKET_SECRET_ACCESS_KEY. Optional:
@@ -121,10 +155,12 @@ def package_s3(output_dir: Path, basename: str) -> dict[str, Any]:
     import boto3  # noqa: PLC0415
     from botocore.client import Config  # noqa: PLC0415
 
-    tarball_bytes = _build_tarball_bytes(output_dir)
+    archive_bytes = _build_archive_bytes(output_dir, archive_format)
+    ext = "zip" if archive_format == "zip" else "tar.gz"
+    content_type = "application/zip" if archive_format == "zip" else "application/gzip"
     # Use a UUID so concurrent jobs with the same basename don't collide.
     import uuid  # noqa: PLC0415
-    key = f"{prefix}{basename}-{uuid.uuid4().hex}.tar.gz"
+    key = f"{prefix}{basename}-{uuid.uuid4().hex}.{ext}"
 
     client = boto3.client(
         "s3",
@@ -138,8 +174,8 @@ def package_s3(output_dir: Path, basename: str) -> dict[str, Any]:
     client.put_object(
         Bucket=bucket,
         Key=key,
-        Body=tarball_bytes,
-        ContentType="application/gzip",
+        Body=archive_bytes,
+        ContentType=content_type,
     )
     url = client.generate_presigned_url(
         "get_object",
@@ -150,7 +186,7 @@ def package_s3(output_dir: Path, basename: str) -> dict[str, Any]:
         "tarball_url": url,
         "tarball_url_expires_in": S3_PRESIGN_TTL_SECONDS,
         "bucket_key": key,
-        "bucket_bytes": len(tarball_bytes),
+        "bucket_bytes": len(archive_bytes),
     }
 
 
@@ -162,6 +198,7 @@ def package_results_entry(
     basename: str,
     source: str,
     pages_requested: int,
+    archive_format: str = "tar.gz",
 ) -> dict[str, Any]:
     """Build one entry of the ``results: [...]`` response array.
 
@@ -181,9 +218,9 @@ def package_results_entry(
         "pages_requested": pages_requested,
     }
     if transport == "tarball_b64":
-        entry["tarball_b64"] = package_tarball(output_dir)
+        entry["tarball_b64"] = package_tarball(output_dir, archive_format)
     elif transport == "s3":
-        entry.update(package_s3(output_dir, basename))
+        entry.update(package_s3(output_dir, basename, archive_format))
     else:  # inline
         entry.update(package_inline(output_dir, basename, formats=formats))
     return entry

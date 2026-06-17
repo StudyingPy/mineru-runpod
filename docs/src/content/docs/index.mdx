@@ -10,10 +10,14 @@ hero:
       <img src="/mineru-runpod/promo_bg.png" alt="PDF transformed to Markdown by a serverless cloud" class="rm-hero-promo" loading="eager" decoding="async" width="1024" height="1024" />
 
   actions:
+    - text: Deploy on RunPod
+      link: https://runpod.io?ref=31jdfpnq
+      icon: rocket
+      variant: primary
     - text: Get started
       link: /mineru-runpod/getting-started/overview/
       icon: right-arrow
-      variant: primary
+      variant: minimal
     - text: GitHub
       link: https://github.com/sergeyshmakov/mineru-runpod
       icon: external
@@ -28,7 +32,7 @@ import { Card, CardGrid } from "@astrojs/starlight/components";
 
 ## How it works
 
-This is an open-source repo and [RunPod Hub](https://runpod.io?ref=31jdfpnq) template — not a hosted service. Fork it, deploy from the Hub, and the worker runs on **your** RunPod account against **your** wallet.
+This is an open-source repo and [RunPod Hub](https://runpod.io?ref=31jdfpnq) template — not a hosted service. Deploy it from the Hub (or fork it for full control), and the worker runs on **your** RunPod account against **your** wallet.
 
 Under the hood it's one Docker image wrapping [MinerU](https://github.com/opendatalab/MinerU) (3.2.x runtime, `MinerU2.5-Pro-2605-1.2B` VLM by default). Send a PDF as a URL, base64 blob, or path on a mounted volume. Get back Markdown, a structured `content_list`, the raw `middle.json`, and extracted images. When traffic stops, RunPod tears the worker down in seconds.
 

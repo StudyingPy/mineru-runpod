@@ -10,9 +10,8 @@ The repo's default GPU pool is `ADA_24` (24 GB Ada — RTX 4090). The `MinerU2.5
 | You are… | Use GPU pool | Why |
 |---|---|---|
 | Parsing small-to-medium docs (≤100 pages) one at a time | `ADA_24` (default) or `AMPERE_24` | 4090 is ~4× faster per warm page than A5000, and supply is better. A5000 has lower $/hr if you can tolerate slower parses. |
-| Doing concurrent batching inside a single worker | `AMPERE_48` | vLLM async engine can grow KV cache beyond 24 GB under batch pressure. |
-| Parsing large books (100–1,000 pages) | `AMPERE_48` | Headroom for dense layout / long reading-order context. |
-| Parsing huge documents (1,000+ pages) | `AMPERE_48` + `--backend pipeline` | Switch off vLLM KV-cache mode; pipeline backend processes page-by-page with a 4 GB minimum (per MinerU upstream). |
+| Parsing large books or huge documents (100–10,000+ pages) | `ADA_24` (default), **batched** | Document length doesn't grow VRAM — a single sequential parse stays ~13 GiB at any page count. Slice the doc into page-range jobs client-side (`start_page`/`end_page`); each batch fits 24 GB. We ran 5,039 pages this way on a 24 GB A5000. See [Large documents](#large-documents-batch-dont-size-up). |
+| Doing concurrent batching (multiple docs) inside one worker | `AMPERE_48` | vLLM async engine can grow KV cache beyond 24 GB under batch pressure. This — not document size — is the real reason to size up. |
 
 If you're unsure, **start with the default `ADA_24` and watch for OOM in the worker logs**. Bumping to a 48 GB pool is a one-line change to `deploy.py --gpu-ids` or the `gpuIds` field in your endpoint config.
 
@@ -34,14 +33,14 @@ The model itself is small (~2 GB). **The dominant consumer is vLLM's KV cache**,
 Implications:
 
 - **24 GB GPUs are the right minimum.** A 16 GB card cannot fit the default config — vLLM would OOM during engine init.
-- **Sequential parses don't grow above ~13 GiB.** KV cache is bounded by `gpu_memory_utilization`; long documents don't push it higher.
+- **Sequential parses don't grow above ~13 GiB — at any page count.** KV cache is bounded by `gpu_memory_utilization`; document length doesn't push it higher. We confirmed this end-to-end: a **5,039-page** PDF parsed on a 24 GB A5000 with the default `vlm-auto-engine` backend, sliced into page-range batches client-side ([walkthrough](/mineru-runpod/blog/2026-06-03-clause-aligned-batching-large-pdf-mineru/)). So **don't size up the GPU for a big document — batch it** (see [Large documents](#large-documents-batch-dont-size-up)).
 - **Concurrent batching grows KV cache pressure**, not other components. To bound max VRAM under heavy concurrency, either move to a 48 GB pool or tune `gpu_memory_utilization` downward.
 
 ### Rough peak VRAM by workload shape (estimates)
 
 | Workload | Peak VRAM | Fits in |
 |---|---|---|
-| Single-doc sequential (default config) | ~13 GiB | 24 GB ✓ |
+| Single-doc sequential (default config, any page count) | ~13 GiB | 24 GB ✓ |
 | Single-worker, light async batching (≤4 concurrent pages) | ~14–18 GiB | 24 GB ✓ |
 | Single-worker, heavy batching (8+ concurrent, large docs) | 20+ GiB | 48 GB recommended |
 | Pipeline backend (`backend: "pipeline"`) — no vLLM KV cache | 4 GB min (MinerU upstream) | 24 GB easily ✓ |
@@ -51,6 +50,8 @@ Implications:
 The published benchmarks ran on dual RTX 4090 (effectively 48 GB combined) to **maximize throughput** for the leaderboard numbers — not because correctness requires it. If you're running a single document at a time in a serverless worker, you do not need 48 GB.
 
 ## Workload-to-GPU map
+
+Concurrency comes from two independent levers — `workers_max` (more workers) and `MINERU_MAX_CONCURRENCY` (more jobs per worker); see [Concurrency](/mineru-runpod/guides/concurrency/) for the full model. Horizontal `workers_max` on 24 GB workers is the default throughput dial; the only shape that needs a 48 GB pool is in-worker concurrency.
 
 ### Single worker, one doc at a time
 
@@ -62,11 +63,11 @@ This is the default RunPod serverless shape: each incoming job spins a worker, t
 
 ### Single worker, batching multiple docs
 
-If you set `concurrencyModifier` > 1 on your endpoint so one worker handles several requests in parallel, the vLLM async engine batches their pages. KV cache grows linearly with batch size.
+If you set `MINERU_MAX_CONCURRENCY` > 1 (RunPod calls this the `concurrencyModifier`) so one worker handles several requests at once, the vLLM async engine batches their pages through a shared KV cache, which grows roughly linearly with concurrency. Worth it only when single requests don't saturate the GPU (small or I/O-heavy docs) — otherwise add a worker instead. See [Concurrency → in-worker](/mineru-runpod/guides/concurrency/#niche-in-worker-concurrency).
 
-- **GPU pool**: `ADA_24` for small batches (≤4 concurrent), `AMPERE_48` for larger
-- **VRAM peak**: 11–16 GB depending on batch size
-- **Trade-off**: higher throughput per worker; harder to bound max VRAM. Watch `nvidia-smi` in worker logs after deploy.
+- **GPU pool**: `ADA_24` for light concurrency (≤4), `AMPERE_48` for more
+- **VRAM peak**: 11–16 GB depending on concurrency
+- **Trade-off**: higher utilization per worker; harder to bound max VRAM. Watch `nvidia-smi` in worker logs after deploy.
 
 ### Multiple workers, one doc each (horizontal scaling)
 
@@ -74,15 +75,15 @@ This is what RunPod does when you set `workers_max > 1` and several requests arr
 
 - **GPU pool**: `ADA_24` per worker
 - **VRAM peak**: ~13 GiB per worker
-- **Scaling note**: you pay per worker-second, so cost scales linearly. The default `workers_max: 3` in `hub.json` is a sensible cap for spiky workloads.
+- **Scaling note**: you pay per worker-second, so cost scales linearly. The default `workers_max: 3` (set in `deploy.py` / the dashboard, not `hub.json`) is a sensible cap for spiky workloads.
 
-### Multiple workers, batching inside each
+### Multiple workers, in-worker concurrency on each
 
-The high-throughput shape: `workers_max > 1` AND `concurrencyModifier > 1`. Each worker batches several pages internally while RunPod scales horizontally.
+The maximum-throughput shape: `workers_max > 1` AND `MINERU_MAX_CONCURRENCY > 1`. Each worker runs several jobs through its shared engine while RunPod scales horizontally.
 
 - **GPU pool**: `AMPERE_48`
 - **VRAM peak**: 16+ GB per worker
-- **When to use**: high-volume production ingest where you've already validated the workload mix on 24 GB.
+- **When to use**: high-volume ingest of small or I/O-heavy docs where you've already validated that in-worker concurrency beats simply adding 24 GB workers.
 
 ## Document-size adjustments
 
@@ -91,8 +92,22 @@ The high-throughput shape: `workers_max > 1` AND `concurrencyModifier > 1`. Each
 | Tiny | 1–3 | `ADA_24` | Default 24 GB pool; ~13 GiB peak. 16 GB pools won't fit the default vLLM config. |
 | Small | 3–30 | `ADA_24` | The "average document" case the defaults are tuned for. |
 | Medium | 30–100 | `ADA_24` | Same default; KV cache stays well under 16 GB even on dense pages. |
-| Large | 100–1,000 | `AMPERE_48` | More headroom for dense layouts. Sequential mode still uses ~10 GB, so 48 GB is safety margin. |
-| Huge | 1,000–10,000 | `AMPERE_48` + `--backend pipeline` | See next section. |
+| Large | 100–1,000 | `ADA_24`, batched | Page count doesn't raise the ~13 GiB peak, so 24 GB fits. Batch into page-range jobs (below) for resumability and to stay under the 20 MB response cap — not because 24 GB runs out. |
+| Huge | 1,000–10,000 | `ADA_24`, batched | Same: don't size up. We parsed a 5,039-page PDF on a 24 GB A5000 with `vlm-auto-engine`, batched client-side. |
+
+### Large documents: batch, don't size up
+
+A bigger document is **not** a reason for a bigger GPU. A single sequential parse peaks ~13 GiB no matter how many pages you feed it, so a 1,000- or 10,000-page PDF fits the default 24 GB pool exactly like a 10-page one does. What breaks on big documents isn't VRAM — it's everything *around* the parse:
+
+- **All-or-nothing failure** — one job that dies at page 4,800 (OOM, transient eviction, timeout) costs the whole run.
+- **The [20 MB response cap](/mineru-runpod/blog/2026-05-20-runpod-20mb-response-cap-r2-bridge/)** — a few hundred pages of output already blows past it.
+- **No resumability** — one job has no checkpoint; a failure means starting over.
+
+The fix is **client-side page-range batching**, not a 48 GB card. The worker slices server-side: pass `start_page`/`end_page` ([API reference](/mineru-runpod/reference/api/)) and each job parses one contiguous range out of the same uploaded file — you never pre-split the PDF. Keep `MINERU_MAX_CONCURRENCY=1` and scale throughput with `workers_max` (more GPU workers, not a bigger GPU). See [Concurrency](/mineru-runpod/guides/concurrency/) for how `workers_max` and `MINERU_MAX_CONCURRENCY` interact.
+
+:::note[The worker does not auto-batch]
+It parses one page range per job; splitting a large document into batches is something *you* do on the client. The full walkthrough — clause-aligned boundaries, R2 transport for huge output, and the throughput math — is in [Clause-aligned batching for large PDFs](/mineru-runpod/blog/2026-06-03-clause-aligned-batching-large-pdf-mineru/), where a **5,039-page** standard parsed on a 24 GB A5000 for ~$1.15.
+:::
 
 ## Picking a backend
 
@@ -101,7 +116,7 @@ MinerU 3.2.x exposes five backends; the template accepts all of them as a per-jo
 | Backend | What it runs | When to pick it | Per-page VRAM |
 |---|---|---|---|
 | `vlm-auto-engine` *(default)* | The `MinerU2.5-Pro-2605-1.2B` VLM via vLLM | English / Chinese (per model card tags), short-to-medium docs, fast wall time | ~13 GiB |
-| `pipeline` | PaddleOCR + dedicated layout/formula/table models | Non-Latin scripts (use a script-family `lang` code), very long docs, constant-memory workloads | **4 GB min** (per MinerU upstream) |
+| `pipeline` | PaddleOCR + dedicated layout/formula/table models | Non-Latin scripts (use a script-family `lang` code), constant-memory workloads, sub-24 GB GPUs | **4 GB min** (per MinerU upstream) |
 | `hybrid-auto-engine` | Pipeline + VLM, auto-routed based on content | Mixed-content docs where the pipeline+VLM combination outperforms either alone | Highest |
 | `vlm-http-client` | Same VLM via an external vLLM OpenAI-compatible server | Split-tier deploys — keep a 24 GB worker cheap, run vLLM on a separate always-on box | Low (no model on worker) |
 | `hybrid-http-client` | Hybrid with external VLM server | Same split-tier idea, on hybrid workloads | Low |

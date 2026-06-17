@@ -50,6 +50,7 @@ The worker accepts any of these formats — PDF, image (PNG/JPEG/GIF/BMP/TIFF/We
 | `transport` | string | `"tarball_b64"` | How the worker ships output. `"tarball_b64"` (default, base64-encoded .tar.gz inside the entry), `"inline"` (per-format keys inside the entry, filterable via `formats`), or `"s3"` (presigned URL — requires `BUCKET_*` env vars on the endpoint). See [Output modes](/mineru-runpod/guides/output-modes/). |
 | `formats` | array of string | all four | Subset of `["markdown", "content_list", "middle", "images"]`. Selects which artifacts the inline payload contains. Omit (or pass all four) to get everything. **No-op for `tarball_b64` and `s3`** — those transports always ship a self-contained archive with all four artifacts. Empty list is rejected. |
 | `basename` | string | `"doc"` | Filename stem for output files. Must be alphanumeric with `-` or `_` |
+| `archive_format` | string | `"tar.gz"` | Archive container for the `tarball_b64` and `s3` transports: `"tar.gz"` (default) or `"zip"`. No-op for `inline`. See [Output modes → archive format](/mineru-runpod/guides/output-modes/#archive-format-targz-or-zip). |
 | `probe` | bool | `false` | Diagnostic mode. `{"probe": true}` skips parsing and every field above, then returns the worker's filesystem layout plus the running MinerU version instead of a parse result — for checking baked model paths and volume mounts. |
 
 ## I just want the Markdown — how do I get it?
@@ -123,16 +124,14 @@ For single-file jobs the markdown lives at `result.results[0].markdown`. Higher-
 
 | Field | Type | Notes |
 |---|---|---|
-| `basename` | string | Echo of the input `basename`, useful when batches arrive |
+| `basename` | string | Echo of the input `basename`, handy for correlating many concurrent jobs |
 | `source` | string | Echo of the input transport: `url:...`, `b64`, or `volume:/path/...` |
 | `pages_requested` | int | The slice the caller asked for. `-1` if `end_page` was open-ended |
-| `tarball_b64` | string | Present when `transport: "tarball_b64"`. Base64-encoded `.tar.gz` of the output directory |
+| `tarball_b64` | string | Present when `transport: "tarball_b64"`. Base64-encoded archive of the output directory — `.tar.gz` by default, `.zip` when `archive_format: "zip"` |
 | `markdown`, `content_list`, `middle`, `images` | various | Present when `transport: "inline"`. The set of keys reflects the `formats` filter — see below |
-| `tarball_url`, `tarball_url_expires_in`, `bucket_key`, `bucket_bytes` | various | Present when `transport: "s3"`. See [Output modes → s3](/mineru-runpod/guides/output-modes/) |
+| `tarball_url`, `tarball_url_expires_in`, `bucket_key`, `bucket_bytes` | various | Present when `transport: "s3"`. The archive is `.tar.gz` by default, `.zip` when `archive_format: "zip"`. See [Output modes → s3](/mineru-runpod/guides/output-modes/) |
 
-:::note[Reserved for batch input]
-A future batch-input phase will add per-entry `ok` and `error` fields so a single-job multi-file submission can report partial success. Today's single-file responses do not include them.
-:::
+Each job parses one file. To process many documents, submit them as individual jobs and raise `workers_max` — RunPod's queue runs them in parallel across workers (see [Scaling](/mineru-runpod/guides/scaling/)).
 
 ### When `transport: "inline"`
 

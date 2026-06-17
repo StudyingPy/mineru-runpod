@@ -44,12 +44,14 @@ export default defineConfig({
 						"getting-started/overview",
 						"getting-started/deploy",
 						"getting-started/clients",
+						"getting-started/migrate-from-mineru-api",
 					],
 				},
 				{
 					label: "Guides",
 					items: [
 						"guides/choosing-gpu",
+						"guides/concurrency",
 						"guides/input-formats",
 						"guides/output-modes",
 						"guides/scaling",

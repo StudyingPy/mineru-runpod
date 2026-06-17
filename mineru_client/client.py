@@ -10,6 +10,7 @@ import io
 import json
 import os
 import tarfile
+import zipfile
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
@@ -18,6 +19,71 @@ import runpod
 
 class MineruClientError(RuntimeError):
     """Raised when the remote handler returns ok=false, or transport fails."""
+
+
+def _safe_tar_extractall(tar, dest: Path) -> None:
+    """Extract a tar, rejecting members that escape ``dest`` or aren't regular
+    files/dirs — guards against path-traversal / absolute-path / symlink / device
+    archives (CVE-2007-4559). Then extracts with the stdlib ``data`` filter where
+    available (Python 3.11.4+/3.12) for defense-in-depth and to avoid the 3.14
+    default-filter deprecation; older patch releases fall back to the plain
+    extract, which the checks above already made safe.
+    """
+    dest = dest.resolve()
+    for member in tar.getmembers():
+        if not (member.isfile() or member.isdir()):
+            raise MineruClientError(
+                f"refusing unsafe tar member {member.name!r} (not a regular file or dir)"
+            )
+        target = (dest / member.name).resolve()
+        if target != dest and dest not in target.parents:
+            raise MineruClientError(
+                f"refusing tar member {member.name!r}: path escapes the destination"
+            )
+    try:
+        tar.extractall(dest, filter="data")
+    except TypeError:
+        tar.extractall(dest)
+
+
+# Socket timeout (seconds) for archive downloads — long enough for slow CDNs /
+# large outputs, short enough that a dead or stalled URL can't hang the caller
+# forever. Mirrors the worker's URL_FETCH_TIMEOUT_SECONDS.
+_DOWNLOAD_TIMEOUT_SECONDS = 120.0
+
+
+def _require_http_url(url: str) -> None:
+    """Reject non-HTTP(S) archive URLs before fetching. Worker presigned URLs are
+    always https; allowing file://, ftp://, etc. from a (possibly caller-supplied)
+    response would invite local-file reads / SSRF.
+    """
+    from urllib.parse import urlparse  # noqa: PLC0415
+
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise MineruClientError(
+            f"refusing to fetch archive from non-HTTP(S) URL (scheme {scheme!r})"
+        )
+
+
+def _extract_archive_bytes(data: bytes, dest_dir: str | Path) -> Path:
+    """Extract archive bytes into dest_dir, autodetecting ``.zip`` vs ``.tar.gz``.
+
+    The worker ships either container depending on ``archive_format`` (default
+    ``tar.gz``; ``zip`` when requested), under the same ``tarball_b64`` /
+    ``tarball_url`` keys — so callers can't assume the format. Zip members are
+    sanitized by the stdlib; tar members go through ``_safe_tar_extractall``
+    (CVE-2007-4559 guard). Returns the destination dir.
+    """
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    if data[:4] == b"PK\x03\x04":  # zip local-file-header magic
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            zf.extractall(dest)
+    else:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+            _safe_tar_extractall(tar, dest)
+    return dest
 
 
 class MineruClient:
@@ -212,21 +278,18 @@ class MineruClient:
 
     @staticmethod
     def save_tarball(result: dict[str, Any], dest_dir: str | Path) -> Path:
-        """Extract the tarball_b64 from `result` into dest_dir. Returns the dir.
+        """Extract the ``tarball_b64`` archive from `result` into dest_dir.
 
         Accepts either the full response wrapper or a single result entry.
+        Autodetects the container — ``.tar.gz`` (default) or ``.zip``
+        (``archive_format="zip"``). Returns the dir.
         """
         entry = MineruClient._unwrap(result)
         if "tarball_b64" not in entry:
             raise MineruClientError(
                 "result has no tarball_b64; was transport='tarball_b64'?"
             )
-        dest = Path(dest_dir)
-        dest.mkdir(parents=True, exist_ok=True)
-        raw = base64.b64decode(entry["tarball_b64"])
-        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
-            tar.extractall(dest)
-        return dest
+        return _extract_archive_bytes(base64.b64decode(entry["tarball_b64"]), dest_dir)
 
     @staticmethod
     def save_s3_tarball(result: dict[str, Any], dest_dir: str | Path) -> Path:
@@ -234,6 +297,7 @@ class MineruClient:
         and extract it into dest_dir. Returns the dir.
 
         Accepts either the full response wrapper or a single result entry.
+        Autodetects the container (``.tar.gz`` or ``.zip``).
 
         The presigned URL expires after ~1 hour; call this promptly after the
         job returns.
@@ -246,13 +310,12 @@ class MineruClient:
         # Lazy import so the client stays dependency-light for callers that
         # only use the tarball_b64 / inline paths.
         import urllib.request  # noqa: PLC0415
-        with urllib.request.urlopen(entry["tarball_url"]) as resp:
+        _require_http_url(entry["tarball_url"])
+        with urllib.request.urlopen(  # noqa: S310
+            entry["tarball_url"], timeout=_DOWNLOAD_TIMEOUT_SECONDS
+        ) as resp:
             data = resp.read()
-        dest = Path(dest_dir)
-        dest.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-            tar.extractall(dest)
-        return dest
+        return _extract_archive_bytes(data, dest_dir)
 
     @staticmethod
     def save_inline(

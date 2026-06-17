@@ -24,7 +24,7 @@ The worker accepts a `file_url` and parses front-to-back, so technically you cou
 
 - **All-or-nothing failure.** A single job that dies at page 4,800 (OOM, a transient GPU eviction, a timeout) costs you the entire run. At ~78 minutes of GPU work (more on that below), that's an expensive coin flip.
 - **No resumability.** One job has no natural checkpoint. If it fails you start over.
-- **The 20 MB response cap.** MinerU's output for a few hundred pages already blows past [RunPod's ~20 MB sync-response ceiling](/mineru-runpod/blog/runpod-20mb-response-cap-r2-bridge/). For 5,000 pages it isn't close: the extracted output here was **869 MB on disk**.
+- **The 20 MB response cap.** MinerU's output for a few hundred pages already blows past [RunPod's ~20 MB sync-response ceiling](/mineru-runpod/blog/2026-05-20-runpod-20mb-response-cap-r2-bridge/). For 5,000 pages it isn't close: the extracted output here was **869 MB on disk**.
 - **Memory.** Holding the layout model output for thousands of pages in one process is a needless VRAM/RAM risk when the work is embarrassingly sliceable.
 
 Batching fixes all four, but only if you batch at the *right* boundaries.
@@ -177,7 +177,7 @@ Verify mechanically: check each batch's produced page span against its planned r
 
 ## Where to next
 
-The output is 36 batches of `content_list.json` with page-indexed, typed blocks. The next step is joining each block's page back to the clause outline to emit a clause-addressable tree (one compact file per clause) that an agent or a retrieval index can navigate. The clause-aligned batching is what makes that join clean: every block already lives inside exactly one clause's batch. [Part 2](/mineru-runpod/blog/structuring-mineru-output-doc-tree/) walks through that post-processing: cleaning the blocks, building the tree, cross-linking, and verifying the result against the source PDF.
+The output is 36 batches of `content_list.json` with page-indexed, typed blocks. The next step is joining each block's page back to the clause outline to emit a clause-addressable tree (one compact file per clause) that an agent or a retrieval index can navigate. The clause-aligned batching is what makes that join clean: every block already lives inside exactly one clause's batch. [Part 2](/mineru-runpod/blog/2026-06-04-structuring-mineru-output-doc-tree/) walks through that post-processing: cleaning the blocks, building the tree, cross-linking, and verifying the result against the source PDF.
 
 ECMA-376 is freely available from [Ecma International](https://ecma-international.org/publications-and-standards/standards/ecma-376/); it's used here purely as a parsing benchmark. The parsed corpus is kept in a private repository for internal use, and this post shares only the parsing process and aggregate statistics, not the standard's content.
 

@@ -14,8 +14,11 @@ as `env` entries in `deploy.py` if you use that.
 
 ## Concurrency
 
-`MINERU_MAX_CONCURRENCY` controls how many jobs a single worker
-handles in parallel. Default `1`.
+`MINERU_MAX_CONCURRENCY` is the **in-worker** concurrency knob — one of
+two concurrency levers. For how it interacts with `workers_max` and the
+request queue (and which to reach for), see
+[Concurrency](/mineru-runpod/guides/concurrency/). It controls how many
+jobs a single worker handles in parallel. Default `1`.
 
 | Value | When to use |
 |---|---|

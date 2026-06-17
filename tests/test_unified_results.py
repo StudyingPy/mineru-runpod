@@ -11,6 +11,7 @@ import base64
 import io
 import json
 import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,29 @@ def test_tarball_entry_carries_basename_source_pages_and_tarball(tmp_path):
     # No inline-format keys leak into a tarball entry.
     assert "markdown" not in entry
     assert "content_list" not in entry
+
+
+def test_tarball_entry_zip_archive_format(tmp_path):
+    """archive_format='zip' produces a base64 .zip (still under tarball_b64)."""
+    out = tmp_path / "out"
+    out.mkdir()
+    _seed_mineru_output(out, "doc")
+    entry = package.package_results_entry(
+        transport="tarball_b64",
+        formats=["markdown"],
+        output_dir=out,
+        basename="doc",
+        source="b64",
+        pages_requested=10,
+        archive_format="zip",
+    )
+    raw = base64.b64decode(entry["tarball_b64"])
+    assert raw[:4] == b"PK\x03\x04"  # zip local-file-header magic
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        names = set(zf.namelist())
+    assert "doc.md" in names
+    assert "doc_content_list.json" in names
+    assert "images/fig1.png" in names
 
 
 def test_inline_entry_with_all_formats(tmp_path):

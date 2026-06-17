@@ -7,7 +7,11 @@ There are three ways to get a mineru-runpod endpoint running. Pick the one that 
 
 ## Option A — Deploy from the RunPod Hub (easiest)
 
-This repo is published as a public Hub template. In the RunPod dashboard go to **The Hub → Serverless repos**, find `mineru-runpod`, click Deploy. RunPod builds the image on your account, you pick a GPU pool, and you get an endpoint id. No fork, no clone, no local setup.
+**[Deploy this endpoint from the RunPod Hub →](https://console.runpod.io/hub/sergeyshmakov/mineru-runpod)**
+
+New to RunPod? [Create your account first](https://runpod.io?ref=31jdfpnq), then come back and click Deploy.
+
+This repo is published as a public Hub template. Open the listing above and click Deploy — or, from the RunPod dashboard, go to **The Hub → Serverless repos**, find `mineru-runpod`, and click Deploy. RunPod builds the image on your account, you pick a GPU pool, and you get an endpoint id. No fork, no clone, no local setup.
 
 This is the recommended path if your goal is parsing PDFs, not customising the worker.
 
@@ -52,7 +56,7 @@ This skips RunPod's auto-build entirely. Use it when you need custom base images
 | `gpu_ids` | `ADA_24` | 24 GB Ada / RTX 4090. Fits the [`MinerU2.5-Pro-2605-1.2B` VLM](https://huggingface.co/opendatalab/MinerU2.5-Pro-2605-1.2B) comfortably with KV cache; faster per page than the cheaper A5000 (`AMPERE_24`). |
 | `idle_timeout` | `10 s` | Scale workers to zero after 10 s of inactivity |
 | `workers_min` | `0` | Pay only when processing |
-| `workers_max` | `3` | Concurrency cap; bump for production |
+| `workers_max` | `3` | [Concurrency](/mineru-runpod/guides/concurrency/) cap (parallel workers); bump for production |
 | `execution_timeout` | `900 s` | Per-job cap; covers a several-hundred-page parse |
 | `flashboot` | `true` | RunPod's fast cold-start tech |
 

@@ -28,6 +28,26 @@ def test_transport_invalid_value_rejected():
 
 
 # -----------------------------------------------------------------------------
+# archive_format
+# -----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("fmt", ["tar.gz", "zip"])
+def test_archive_format_each_valid_value_accepted(fmt):
+    cleaned = validate_input({"file_b64": "AA==", "archive_format": fmt})
+    assert cleaned["archive_format"] == fmt
+
+
+def test_archive_format_default_is_tar_gz():
+    cleaned = validate_input({"file_b64": "AA=="})
+    assert cleaned["archive_format"] == "tar.gz"
+
+
+def test_archive_format_invalid_value_rejected():
+    with pytest.raises(ValueError, match="archive_format must be one of"):
+        validate_input({"file_b64": "AA==", "archive_format": "rar"})
+
+
+# -----------------------------------------------------------------------------
 # formats
 # -----------------------------------------------------------------------------
 

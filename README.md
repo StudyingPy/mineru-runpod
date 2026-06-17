@@ -10,11 +10,11 @@
 
 Serverless [MinerU](https://github.com/opendatalab/MinerU) PDF parser on [RunPod](https://runpod.io?ref=31jdfpnq). MinerU 3.2.x runtime with the `MinerU2.5-Pro-2605-1.2B` VLM. Scales to zero, ~$0.0003 per page on a 24 GB serverless RTX 4090, ten minutes from sign-up to first parse.
 
-**📚 [Docs](https://sergeyshmakov.github.io/mineru-runpod/)**  ·  **🚀 [Deploy on RunPod Hub](https://runpod.io?ref=31jdfpnq)**  ·  **📝 [Blog](https://sergeyshmakov.github.io/mineru-runpod/blog/)**
+**📚 [Docs](https://sergeyshmakov.github.io/mineru-runpod/)**  ·  **🚀 [Get started on RunPod](https://runpod.io?ref=31jdfpnq)**  ·  **📝 [Blog](https://sergeyshmakov.github.io/mineru-runpod/blog/)**
 
 ## 30-second taste
 
-Pick your transport. Either of these works.
+Pick your method. Either of these works.
 
 **Python (`mineru_client`):**
 
@@ -38,7 +38,7 @@ curl -X POST "https://api.runpod.ai/v2/<endpoint-id>/runsync" \
 
 The response wraps each parsed file as an entry inside `results: [...]`. For a single document, the markdown sits at `output.results[0].markdown` — pipe it straight to a file: `curl ... | jq -r '.output.results[0].markdown' > report.md`.
 
-Accepts PDF, image (PNG/JPEG/GIF/BMP/TIFF/WebP), DOCX, PPTX, XLSX. Two orthogonal knobs: **transport** (`tarball_b64` default — base64 tarball; `inline` — fields embedded in the entry; `s3` — presigned URL when outputs would exceed RunPod's ~20 MB response cap, requires `BUCKET_*` env vars) and **formats** (subset of `markdown` / `content_list` / `middle` / `images`; default all four; filters the inline payload).
+Accepts PDF, image (PNG/JPEG/GIF/BMP/TIFF/WebP), DOCX, PPTX, XLSX. Two orthogonal knobs control output — **transport** (`tarball_b64` / `inline` / `s3`) and **formats** — both covered in [Output modes](https://sergeyshmakov.github.io/mineru-runpod/guides/output-modes/).
 
 ## Why this exists
 
@@ -46,11 +46,11 @@ Accepts PDF, image (PNG/JPEG/GIF/BMP/TIFF/WebP), DOCX, PPTX, XLSX. Two orthogona
 - **RunPod Serverless** bills per-second and scales to zero. A 100-page document costs roughly $0.03 on a 24 GB serverless RTX 4090 instead of paying for an always-on GPU. See [RunPod pricing](https://www.runpod.io/pricing) for current rates.
 - **You don't have to wire any of that together yourself.** Deploy from the [RunPod Hub](https://runpod.io?ref=31jdfpnq) in one click, or fork this repo for full control.
 
-## Two ways to integrate
+## Ways to integrate
 
 ### A. Quick start with `MineruClient`
 
-A small Python wrapper that lives in this repo. Best for prototyping and single-user scripts.
+A small Python wrapper that lives in this repo. Best for prototyping and single-user scripts — usage is the snippet above. Install it with:
 
 ```powershell
 # pip
@@ -58,12 +58,6 @@ pip install "mineru-client @ git+https://github.com/sergeyshmakov/mineru-runpod"
 
 # or uv
 uv pip install "mineru-client @ git+https://github.com/sergeyshmakov/mineru-runpod"
-```
-
-```python
-from mineru_client import MineruClient
-client = MineruClient(endpoint_id="<your-endpoint-id>")
-result = client.parse_document(file_url="https://example.com/report.pdf")
 ```
 
 ### B. Production with RunPod SDK / HTTP
@@ -77,32 +71,25 @@ endpoint = runpod.Endpoint("<endpoint-id>")
 result = endpoint.run_sync({"input": {"file_url": "https://example.com/report.pdf"}})
 ```
 
+### C. Migrating from the official MinerU API
+
+Already calling the MinerU cloud API (`mineru.net/api/v4/...`)? `MineruApiClient` mirrors its `create_task` / `get_task` surface over your own endpoint, so you can evaluate or migrate with a near-identical code path. See [Migrate from the MinerU API](https://sergeyshmakov.github.io/mineru-runpod/getting-started/migrate-from-mineru-api/).
+
 Prototype with A; switch to B once you need async, retries, or multi-language callers. See [Clients](https://sergeyshmakov.github.io/mineru-runpod/getting-started/clients/) for the full comparison.
 
 ## API at a glance
 
-Full reference: [docs site](https://sergeyshmakov.github.io/mineru-runpod/reference/api/) and the docstring atop [`handler.py`](handler.py). Summary table:
+Send `{"input": {...}}` to `/runsync` (or `/run`). The most-used fields:
 
 | Field | Required | Default | Notes |
 |---|---|---|---|
-| `file_url` / `file_b64` / `volume_path` | exactly one | — | Public URL, base64 bytes, or container path. Worker auto-detects format. |
-| `start_page` | no | `0` | 0-based inclusive (PDF only) |
+| `file_url` / `file_b64` / `volume_path` | exactly one | — | Public URL, base64 bytes, or container path. Format auto-detected. |
 | `end_page` | no | `-1` | 0-based inclusive; `-1` = end of doc |
-| `lang` | no | `"en"` | Pipeline backend only. Script-family code: `east_slavic`, `cyrillic`, `latin`, `arabic`, `devanagari`, `japan`, `korean`, etc. |
-| `backend` | no | `"vlm-auto-engine"` | `pipeline` / `vlm-auto-engine` / `vlm-http-client` / `hybrid-auto-engine` / `hybrid-http-client` |
-| `server_url` | iff `*-http-client` | — | URL of an external vLLM OpenAI-compatible server |
-| `formula_enable` / `table_enable` | no | `true` | Extract LaTeX / structured HTML tables |
-| `transport` | no | `"tarball_b64"` | `"tarball_b64"` / `"inline"` / `"s3"` — how the worker ships output |
-| `formats` | no | `["markdown","content_list","middle","images"]` | Subset of those four; filters the inline payload (no-op for tarball/s3) |
-| `basename` | no | `"doc"` | Filename stem; alphanumeric + `-_` |
+| `backend` | no | `"vlm-auto-engine"` | `pipeline` / `vlm-auto-engine` / `hybrid-*` / `*-http-client` |
+| `transport` | no | `"tarball_b64"` | `tarball_b64` / `inline` / `s3` — how output ships back |
+| `formats` | no | all four | Subset of `markdown` / `content_list` / `middle` / `images` |
 
-Success response always includes `ok=true`, `elapsed_seconds`, `mineru_version`, a `results: [...]` list (one entry per parsed file — single-file jobs have a one-element list), and a top-level `debug` block (`backend`, `input_format`, `model_dir`, `gpu`, `phase_ms`). Each entry carries `basename`, `source`, `pages_requested`, plus the transport-specific payload:
-
-- `"tarball_b64"` → `tarball_b64` (base64 .tar.gz) inside the entry
-- `"inline"` → `markdown` + `content_list` + `middle` + `images` keys inside the entry, filtered by `formats`
-- `"s3"` → `tarball_url` (presigned, ~1 h) + `tarball_url_expires_in` + `bucket_key` + `bucket_bytes` inside the entry
-
-Errors: top-level `error` + `ok=false` + `traceback` + the same top-level `debug` block (no `results` key).
+Responses wrap each file in a `results: [...]` list alongside a top-level `debug` block; failures set `ok=false` with a top-level `error`. The full field list, per-transport response shapes, and validation rules live in the **[API reference](https://sergeyshmakov.github.io/mineru-runpod/reference/api/)** (mirrored from the docstring atop [`handler.py`](handler.py)).
 
 ## How does it compare?
 
@@ -135,6 +122,7 @@ Everything below the surface lives on the docs site:
 - **[Overview](https://sergeyshmakov.github.io/mineru-runpod/getting-started/overview/)** — what it is, who it's for, architecture
 - **[Deploy](https://sergeyshmakov.github.io/mineru-runpod/getting-started/deploy/)** — Hub one-click, fork-and-build, or BYO image
 - **[Clients](https://sergeyshmakov.github.io/mineru-runpod/getting-started/clients/)** — Python `MineruClient` vs. direct RunPod SDK
+- **[Migrate from the MinerU API](https://sergeyshmakov.github.io/mineru-runpod/getting-started/migrate-from-mineru-api/)** — drop-in-shaped `MineruApiClient` for moving off the cloud API
 - **[Choosing a GPU](https://sergeyshmakov.github.io/mineru-runpod/guides/choosing-gpu/)** — workload-to-pool map, when to bump VRAM
 - **[API reference](https://sergeyshmakov.github.io/mineru-runpod/reference/api/)** — JSON payload contract, response shapes, validation rules
 - **[Blog](https://sergeyshmakov.github.io/mineru-runpod/blog/)** — launch posts and project notes

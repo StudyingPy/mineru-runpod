@@ -1,0 +1,66 @@
+version: 2
+
+updates:
+  # Repo-root npm is dev tooling only: conventional-commit linting + semantic
+  # release (the actual project is Python — see the pip note in dependabot docs/PR).
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+      time: "06:00"
+      timezone: "UTC"
+    allow:
+      - dependency-type: "direct"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    # Conventional-commit prefix so Dependabot PRs pass the commitlint check that
+    # runs on every PR. `build` is this repo's "deps / no release" type, so these
+    # bumps won't trigger a semantic-release version bump.
+    commit-message:
+      prefix: "build"
+      include: "scope"
+    groups:
+      npm-development:
+        dependency-type: "development"
+
+  # Docs site (Astro / Starlight) in /docs.
+  - package-ecosystem: "npm"
+    directory: "/docs"
+    schedule:
+      interval: "monthly"
+      time: "06:00"
+      timezone: "UTC"
+    allow:
+      - dependency-type: "direct"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "docs"
+    commit-message:
+      prefix: "build"
+      include: "scope"
+    groups:
+      docs-deps:
+        patterns:
+          - "*"
+
+  # GitHub Actions used by the CI / release / docs workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "github-actions"
+    # `ci` (no release) — these bumps only touch workflow files.
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

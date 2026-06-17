@@ -7,6 +7,7 @@ import io
 import json
 import os
 import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -293,36 +294,99 @@ def test_save_inline_empty_images_dict_skips_dir(tmp_path):
 # save_s3_tarball — accepts wrapper or entry
 # -----------------------------------------------------------------------------
 
+def _serve(monkeypatch, data: bytes) -> None:
+    """Make urllib.request.urlopen return `data` (no network, no file://; the
+    scheme guard rejects file://, so tests serve over a fake https URL)."""
+    class _Resp:
+        def read(self):
+            return data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda url, *a, **k: _Resp())
+
+
+def _md_tarball_bytes() -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        md_data = b"# from s3\n"
+        info = tarfile.TarInfo("doc.md")
+        info.size = len(md_data)
+        tar.addfile(info, io.BytesIO(md_data))
+    return buf.getvalue()
+
+
 def test_save_s3_tarball_requires_url_field(tmp_path):
     with pytest.raises(MineruClientError, match="no tarball_url"):
         MineruClient.save_s3_tarball({"ok": True}, tmp_path)
 
 
-def test_save_s3_tarball_downloads_and_extracts_from_wrapper(tmp_path):
-    src = tmp_path / "fake.tar.gz"
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        md_data = b"# from s3\n"
-        info = tarfile.TarInfo("doc.md")
-        info.size = len(md_data)
-        tar.addfile(info, io.BytesIO(md_data))
-    src.write_bytes(buf.getvalue())
-
-    wrapper = _wrap({"basename": "doc", "tarball_url": src.as_uri(), "bucket_bytes": 1})
+def test_save_s3_tarball_downloads_and_extracts_from_wrapper(tmp_path, monkeypatch):
+    _serve(monkeypatch, _md_tarball_bytes())
+    wrapper = _wrap({"basename": "doc", "tarball_url": "https://bucket.example/fake.tar.gz", "bucket_bytes": 1})
     dest = MineruClient.save_s3_tarball(wrapper, tmp_path / "out")
     assert (Path(dest) / "doc.md").read_bytes() == b"# from s3\n"
 
 
-def test_save_s3_tarball_downloads_and_extracts_from_entry(tmp_path):
-    src = tmp_path / "fake.tar.gz"
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        md_data = b"# from s3\n"
-        info = tarfile.TarInfo("doc.md")
-        info.size = len(md_data)
-        tar.addfile(info, io.BytesIO(md_data))
-    src.write_bytes(buf.getvalue())
-
-    entry = {"basename": "doc", "tarball_url": src.as_uri()}
+def test_save_s3_tarball_downloads_and_extracts_from_entry(tmp_path, monkeypatch):
+    _serve(monkeypatch, _md_tarball_bytes())
+    entry = {"basename": "doc", "tarball_url": "https://bucket.example/fake.tar.gz"}
     dest = MineruClient.save_s3_tarball(entry, tmp_path / "out")
     assert (Path(dest) / "doc.md").read_bytes() == b"# from s3\n"
+
+
+def test_save_s3_tarball_rejects_non_http_url(tmp_path):
+    """A file:// (or other non-HTTP) tarball_url is refused before fetching."""
+    with pytest.raises(MineruClientError, match="non-HTTP"):
+        MineruClient.save_s3_tarball({"tarball_url": "file:///etc/passwd"}, tmp_path / "out")
+
+
+def test_save_tarball_handles_zip(tmp_path):
+    """save_tarball autodetects a base64 .zip payload (archive_format='zip')."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w") as zf:
+        zf.writestr("doc.md", "# zip\n")
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    dest = MineruClient.save_tarball({"tarball_b64": encoded}, tmp_path / "out")
+    assert (Path(dest) / "doc.md").read_text() == "# zip\n"
+
+
+def test_save_s3_tarball_handles_zip(tmp_path, monkeypatch):
+    """save_s3_tarball autodetects a downloaded .zip (archive_format='zip')."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w") as zf:
+        zf.writestr("doc.md", "# zip\n")
+    _serve(monkeypatch, buf.getvalue())
+    dest = MineruClient.save_s3_tarball(
+        {"tarball_url": "https://bucket.example/out.zip"}, tmp_path / "out"
+    )
+    assert (Path(dest) / "doc.md").read_text() == "# zip\n"
+
+
+def test_save_s3_tarball_passes_a_timeout(tmp_path, monkeypatch):
+    """urlopen must be called with a timeout so a stalled download can't hang forever."""
+    captured = {}
+
+    class _Resp:
+        def read(self):
+            return _md_tarball_bytes()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(url, *a, **k):
+        captured["timeout"] = k.get("timeout")
+        return _Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    MineruClient.save_s3_tarball(
+        {"tarball_url": "https://bucket.example/fake.tar.gz"}, tmp_path / "out"
+    )
+    assert isinstance(captured["timeout"], (int, float)) and captured["timeout"] > 0
