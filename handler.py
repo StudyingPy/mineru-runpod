@@ -1,12 +1,20 @@
 """RunPod serverless entry point for the MinerU worker.
 
-The pieces this orchestrates live in the worker/ package:
-  worker.schema   — input validation
-  worker.io       — fetch raw bytes from URL / b64 / volume + format detection
-  worker.parse    — MinerU lazy import + async parse call
-  worker.package  — tarball / inline / s3 response packaging
-  worker.debug    — GPU info, model dir, /runpod-volume probe
-  worker.logging  — JSON / text structured logging
+The MinerU-specific pieces this orchestrates live in the worker/ package:
+  worker.harness   — what this worker declares about itself to the harness
+  worker.schema    — input validation
+  worker.parse     — MinerU lazy import + async parse call
+  worker.telemetry — optional OpenTelemetry export
+  worker.warmup    — one throwaway parse at boot
+
+The engine-agnostic ones come from the runpod_doc_worker package, which
+worker.harness configures for this worker:
+  transport.io      — fetch raw bytes from URL / b64 / volume + format detection
+  transport.net     — target checks for the URL job inputs (used by io/schema)
+  transport.package — tarball / inline / s3 response packaging
+  obs.logging       — JSON / text structured logging
+  obs.redact        — one shape for the text a failure reports
+  obs.debug         — GPU info, model dir, /runpod-volume probe
 
 The module surface (``handler.MAX_INLINE_FILE_MB``, ``handler._detect_format``,
 ``handler._validate_input``, ``handler._package_tarball``, etc.) is preserved
@@ -18,7 +26,6 @@ from __future__ import annotations
 import os
 import signal
 import tempfile
-import threading
 import time
 import traceback
 from pathlib import Path
@@ -26,34 +33,40 @@ from typing import Any
 
 import runpod
 
-from worker import debug as _debug
-from worker import io as _io
-from worker import logging as _logging
-from worker import package as _package
+from runpod_doc_worker.contract import degraded as _degraded
+from runpod_doc_worker.obs import debug as _debug
+from runpod_doc_worker.obs import logging as _logging
+
+from worker import envelope as _envelope
+from worker.envelope import (
+    _PROBE_NOT_DISABLED,  # noqa: F401 - re-exported below
+    _build_debug,
+    _maybe_progress,
+    _measure_output_bytes,
+    _probe_allowed,
+)
+from worker import lifecycle as _lifecycle
+from worker.lifecycle import (
+    _concurrency_modifier,
+    _note_shutdown,
+    _on_sigterm,
+    _record_degradation,
+    _record_job,
+    _refresh_lock,  # noqa: F401 - re-exported below
+    _refresh_thresholds,  # noqa: F401 - re-exported below
+    _shutting_down,  # noqa: F401 - re-exported below
+)
+from runpod_doc_worker.obs import redact as _redact
+from runpod_doc_worker.transport import io as _io
+from runpod_doc_worker.transport import package as _package
+
+# Installs this worker's harness config. Imported first among the worker
+# modules so the declaration is visible here rather than arriving as a side
+# effect of importing one of the others.
+from worker import harness as _harness  # noqa: F401
 from worker import parse as _parse
 from worker import schema as _schema
 from worker import telemetry as _telemetry
-
-
-# -----------------------------------------------------------------------------
-# Graceful shutdown
-# -----------------------------------------------------------------------------
-#
-# RunPod sends SIGTERM when recycling a worker (idle timeout, refresh, manual
-# stop). The SDK already drains in-flight jobs, but the user-visible signal
-# tends to be "worker logs go silent." We install a breadcrumb handler + a
-# shutdown event that the handler checks between phases — so a request that's
-# between fetch_input and parse can bail out instead of consuming GPU time
-# that's about to be killed anyway. Mid-parse cancellation is NOT possible
-# (vLLM forward pass is a blocking GPU call from asyncio's POV).
-
-_shutting_down = threading.Event()
-
-
-def _on_sigterm(signum: int, frame: Any) -> None:  # noqa: ARG001
-    _logging.warning("sigterm received, draining current job")
-    _telemetry.counter_add("refresh_total", reason="sigterm")
-    _shutting_down.set()
 
 
 # Install at module init. RunPod's SDK may install its own handler when
@@ -64,145 +77,6 @@ try:
     signal.signal(signal.SIGTERM, _on_sigterm)
 except (ValueError, OSError) as e:  # pragma: no cover — non-main-thread case
     _logging.warning("could not install sigterm handler", error=repr(e))
-
-
-def _check_shutdown() -> None:
-    """Raise if SIGTERM has been received. Called between request phases."""
-    if _shutting_down.is_set():
-        raise RuntimeError("worker shutting down, refusing further work")
-
-
-# -----------------------------------------------------------------------------
-# Cumulative refresh counters
-# -----------------------------------------------------------------------------
-#
-# Recycle this worker after N cumulative jobs or M cumulative pages so that
-# MinerU + vLLM accumulated VRAM fragmentation gets released. Opt-in via env
-# vars; both default to 0 (disabled). When a threshold trips, the handler
-# attaches `refresh_worker: True` to the response — RunPod's SDK then kills
-# the worker after the response is sent.
-#
-# Pages counter only increments when the caller used a bounded slice
-# (end_page >= 0). Full-document parses (end_page=-1, the default) contribute
-# 1 to jobs but 0 to pages — documented in scaling.mdx so operators know to
-# use the jobs counter for unbounded workloads.
-
-_jobs_processed = 0
-_pages_processed_total = 0
-_refresh_lock = threading.Lock()
-
-
-def _refresh_thresholds() -> tuple[int, int]:
-    """Read thresholds from env on every job so they can be tuned without redeploy."""
-    try:
-        jobs = int(os.environ.get("REFRESH_WORKER_AFTER_JOBS", "0"))
-    except ValueError:
-        jobs = 0
-    try:
-        pages = int(os.environ.get("REFRESH_WORKER_AFTER_PAGES", "0"))
-    except ValueError:
-        pages = 0
-    return max(0, jobs), max(0, pages)
-
-
-def _record_job(pages: int) -> str | None:
-    """Bump counters; return the refresh reason if a threshold was crossed.
-
-    ``pages`` is the requested slice size (positive) or 0 for unbounded /
-    unknown — only the jobs counter increments in the unbounded case.
-    Returns ``"jobs_threshold"`` or ``"pages_threshold"`` when a recycle
-    should be signaled, ``None`` otherwise. Jobs is checked first so if
-    both trip on the same job, jobs wins (deterministic, matches the
-    order the env vars are documented in).
-    """
-    global _jobs_processed, _pages_processed_total
-    with _refresh_lock:
-        _jobs_processed += 1
-        if pages > 0:
-            _pages_processed_total += pages
-        jobs_th, pages_th = _refresh_thresholds()
-        if jobs_th > 0 and _jobs_processed >= jobs_th:
-            return "jobs_threshold"
-        if pages_th > 0 and _pages_processed_total >= pages_th:
-            return "pages_threshold"
-        return None
-
-
-# -----------------------------------------------------------------------------
-# Concurrency
-# -----------------------------------------------------------------------------
-#
-# vLLM pre-allocates a large KV cache and isn't safe to drive from concurrent
-# aio_do_parse calls on smaller GPUs. Default 1 is safe on every supported
-# GPU type. Operators with ≥24 GB GPUs may raise via MINERU_MAX_CONCURRENCY.
-# See guides/scaling.mdx for the VRAM math.
-
-def _concurrency_modifier(current_concurrency: int) -> int:  # noqa: ARG001
-    try:
-        return max(1, int(os.environ.get("MINERU_MAX_CONCURRENCY", "1")))
-    except ValueError:
-        return 1
-
-
-# -----------------------------------------------------------------------------
-# Progress + debug envelope
-# -----------------------------------------------------------------------------
-
-def _maybe_progress(job: dict, data: dict) -> None:
-    """Best-effort progress update. Tests / sync clients without a job id
-    shouldn't fail just because we tried to surface progress."""
-    try:
-        runpod.serverless.progress_update(job, data)
-    except Exception as e:  # noqa: BLE001
-        _logging.debug("progress_update failed", error=repr(e))
-
-
-def _build_debug(phase_ms: dict[str, int], gpu_info: dict[str, Any], **extra: Any) -> dict[str, Any]:
-    return {
-        "gpu": gpu_info,
-        "model_dir": _debug.find_model_dir(),
-        "phase_ms": phase_ms,
-        **extra,
-    }
-
-
-def _measure_output_bytes(response: dict[str, Any], transport: str) -> int:
-    """Approximate bytes shipped to the caller, for the egress metrics.
-
-    Reads from ``response["results"][0]`` — the per-file entry — because the
-    payload-carrying keys (``tarball_b64``, ``markdown``, ``images``,
-    ``bucket_bytes``) live there in the unified response shape.
-
-    Per-transport sizing:
-      * tarball_b64 — the b64 string IS the payload; len() is exact.
-      * inline      — markdown text + image bytes dominate the JSON-encoded
-                      response; sum those (json overhead for content_list/
-                      middle is ignored). Cheap and within ~10% of the true
-                      response size on real documents.
-      * s3          — package_s3 records the uploaded tarball size in
-                      `bucket_bytes`; the worker shipped exactly that.
-    Returns 0 when the response shape doesn't include the expected fields
-    (e.g. an empty parse or a failure response with no `results`) so the
-    histogram doesn't get a misleading zero sample for "no output produced."
-    """
-    results = response.get("results") or []
-    if not results:
-        return 0
-    entry = results[0] if isinstance(results[0], dict) else {}
-    if transport == "tarball_b64":
-        tb = entry.get("tarball_b64")
-        return len(tb) if isinstance(tb, str) else 0
-    if transport == "s3":
-        return int(entry.get("bucket_bytes") or 0)
-    if transport == "inline":
-        md = entry.get("markdown") or ""
-        images = entry.get("images") or {}
-        md_bytes = len(md.encode("utf-8")) if isinstance(md, str) else 0
-        image_bytes = sum(
-            len(v) for v in images.values() if isinstance(v, str)
-        ) if isinstance(images, dict) else 0
-        return md_bytes + image_bytes
-    return 0
 
 
 async def _handle_probe(started: float, gpu_info: dict[str, Any], phase_ms: dict[str, int]) -> dict[str, Any]:
@@ -240,19 +114,22 @@ async def _handle_parse(
         compute_capability=gpu_info.get("compute_capability"),
     )
 
-    _check_shutdown()
-    _maybe_progress(job, {"phase": "fetching_input"})
+    _note_shutdown("fetch_input")
+    await _maybe_progress(job, {"phase": "fetching_input"})
     t = time.monotonic()
     with _telemetry.span("mineru.fetch_input", phase="fetch_input"):
         file_bytes, source = await _io.resolve_input_bytes(cleaned)
+        telemetry_source = _io.telemetry_source_kind(source)
         _telemetry.set_span_attrs(**{
-            "mineru.source": source,
+            "mineru.source": telemetry_source,
             "mineru.bytes_in": len(file_bytes),
         })
     fetch_seconds = time.monotonic() - t
     phase_ms["fetch_input"] = int(fetch_seconds * 1000)
     _telemetry.histogram_record("phase_duration", fetch_seconds, phase="fetch_input")
-    _telemetry.counter_add("bytes_in_total", len(file_bytes), source=source)
+    _telemetry.counter_add(
+        "bytes_in_total", len(file_bytes), source=telemetry_source,
+    )
     _telemetry.histogram_record("input_size_bytes", float(len(file_bytes)))
 
     input_format = _io.detect_format(file_bytes)
@@ -264,8 +141,8 @@ async def _handle_parse(
             "file_url returned the file body (not an error page)."
         )
 
-    _check_shutdown()
-    _maybe_progress(job, {
+    _note_shutdown("parse")
+    await _maybe_progress(job, {
         "phase": "parsing",
         "input_bytes": len(file_bytes),
         "input_format": input_format,
@@ -298,13 +175,17 @@ async def _handle_parse(
                 server_url=cleaned.get("server_url"),
                 formula_enable=cleaned["formula_enable"],
                 table_enable=cleaned["table_enable"],
+                effort=cleaned["effort"],
             )
         parse_seconds = time.monotonic() - t
         phase_ms["mineru_parse"] = int(parse_seconds * 1000)
         _telemetry.histogram_record("phase_duration", parse_seconds, phase="parse")
 
-        _check_shutdown()
-        _maybe_progress(job, {"phase": "packaging"})
+        _note_shutdown("package")
+        # No progress update here: packaging carries nothing a caller can act
+        # on, and awaiting a post immediately before the result would add a
+        # round-trip to every job for that. Issue #4 dropped it because the
+        # unawaited post could strand the job; _maybe_progress now waits.
 
         t = time.monotonic()
         # `pages_requested` reflects the slice the caller asked for, NOT the
@@ -315,6 +196,10 @@ async def _handle_parse(
         )
         transport = cleaned["transport"]
         formats = cleaned["formats"]
+        # Our own report, rather than reading `degraded` back off the entry:
+        # what was lost is wanted here as a count, and the entry is a response
+        # shape that should not have to double as an internal channel.
+        lost = _degraded.Report()
         with _telemetry.span(
             "mineru.package",
             phase="package",
@@ -326,9 +211,12 @@ async def _handle_parse(
                 output_dir=output_dir,
                 basename=cleaned["basename"],
                 source=source,
-                pages_requested=pages_requested,
+                manifest=_harness.MANIFEST,
+                metadata={"pages_requested": pages_requested},
                 archive_format=cleaned["archive_format"],
+                report=lost,
             )
+        _record_degradation(lost)
         response: dict[str, Any] = {
             "ok": True,
             "elapsed_seconds": round(time.monotonic() - started, 2),
@@ -370,8 +258,8 @@ async def _handle_parse(
             _logging.info(
                 "refresh threshold crossed; signaling worker recycle",
                 reason=refresh_reason,
-                jobs_processed=_jobs_processed,
-                pages_processed_total=_pages_processed_total,
+                jobs_processed=_lifecycle.jobs_since_boot(),
+                pages_processed_total=_lifecycle.pages_since_boot(),
             )
 
         # Top-level metrics for the just-completed job. Labels match the
@@ -419,6 +307,11 @@ async def handler(job: dict) -> dict:
             # Probe mode bypasses schema validation: a probe has no file source
             # and the operator may want to send arbitrary debug flags through.
             if raw_input.get("probe") is True:
+                if not _probe_allowed():
+                    raise ValueError(
+                        "probe is disabled on this endpoint "
+                        "(MINERU_DISABLE_PROBE)"
+                    )
                 return await _handle_probe(started, gpu_info, phase_ms)
 
             cleaned = _schema.validate_input(raw_input)
@@ -432,26 +325,50 @@ async def handler(job: dict) -> dict:
                 "errors_total", type=type(exc).__name__, phase="handler",
             )
             _telemetry.counter_add("jobs_total", status="error")
+            # One shape for the failure text across all three sinks (response,
+            # stdout, optional OTLP export) — see the harness's obs.redact.
             _logging.error(
                 "job failed",
                 error_type=type(exc).__name__,
-                error_message=str(exc),
+                error_message=_redact.compact(str(exc)),
                 phase_ms=phase_ms,
             )
             return {
-                "error": f"{type(exc).__name__}: {exc}",
+                "error": _redact.compact(f"{type(exc).__name__}: {exc}"),
                 "ok": False,
                 "elapsed_seconds": round(time.monotonic() - started, 2),
                 "mineru_version": _parse.MINERU_VERSION,
-                "traceback": traceback.format_exc(limit=5),
+                "traceback": _redact.compact(
+                    traceback.format_exc(limit=5), limit=4000
+                ),
                 "debug": _build_debug(phase_ms, gpu_info),
             }
 
 
 # -----------------------------------------------------------------------------
-# Back-compat surface for tests and any out-of-tree callers that imported
-# helpers from this module directly. New code should import from worker.*.
+# Back-compat surface for tests and any out-of-tree callers
+#
+# Names that once lived here and now live under `worker.*`. Callers that imported
+# them from here keep working; new code should import from `worker.*` or the
+# harness. `_shutting_down`, `_refresh_lock`, `_refresh_thresholds` and
+# `_PROBE_NOT_DISABLED` belong to it too -- imported above, not called here, and
+# the shutdown event must be the same object lifecycle mutates, not a copy.
+#
+# Asserted by `tests/test_public_surface.py`: three refactors have dropped a name
+# from here without noticing, and a list in a comment cannot fail.
 # -----------------------------------------------------------------------------
+
+
+def __getattr__(name: str) -> object:
+    # The two counters are in the surface below but forwarded, not aliased: an
+    # int cannot share a rebinding. See `worker.lifecycle.jobs_since_boot`.
+    if name in _lifecycle.FORWARDED:
+        return getattr(_lifecycle, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# Writes, which the hook above cannot cover: `worker.lifecycle.forward_writes`.
+_lifecycle.forward_writes(__name__)
 
 MAX_INLINE_FILE_MB = _io.MAX_INLINE_FILE_MB
 MINERU_VERSION = _parse.MINERU_VERSION
@@ -461,7 +378,6 @@ _resolve_input_bytes = _io.resolve_input_bytes
 _detect_format = _io.detect_format
 _validate_input = _schema.validate_input
 _package_tarball = _package.package_tarball
-_package_inline = _package.package_inline
 _package_s3 = _package.package_s3
 _build_tarball_bytes = _package._build_tarball_bytes
 _build_zip_bytes = _package._build_zip_bytes
@@ -469,6 +385,10 @@ _run_mineru = _parse.run_mineru
 _collect_gpu_info = _debug.collect_gpu_info
 _find_model_dir = _debug.find_model_dir
 _probe_filesystem = _debug.probe_filesystem
+# Moved to `worker.envelope` with the rest of the response-shaped helpers, and the
+# only one of them that was not re-exported -- so `handler._package_inline` raised
+# AttributeError for anyone still calling it.
+_package_inline = _envelope._package_inline
 
 
 def _bootstrap_main() -> None:
@@ -517,16 +437,10 @@ def _bootstrap_main() -> None:
         # tasks, so they do not interact with vLLM's event loop.
         _telemetry.init_telemetry()
 
-        # Hand worker-state getters to the telemetry module so its
-        # observable gauges don't have to import ``handler`` (avoids
-        # an import cycle and keeps the dependency arrow pointing
-        # from the entry-point module into telemetry, not the
-        # reverse). Safe to call when telemetry is disabled — the
-        # getters are simply unused.
-        _telemetry.register_worker_gauges(
-            jobs_since_boot=lambda: _jobs_processed,
-            pages_since_boot=lambda: _pages_processed_total,
-        )
+        # Getters, so telemetry's observable gauges need not import
+        # ``handler`` — that would be an import cycle. Unused when
+        # telemetry is disabled.
+        _telemetry.register_worker_gauges(**_lifecycle.GAUGE_GETTERS)
 
         # 1. Fitness checks (runpod-python runs these synchronously
         # before serving; we run them async in the same loop).

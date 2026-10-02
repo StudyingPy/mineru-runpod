@@ -1,14 +1,23 @@
 name: Build and Push to Docker Hub
 
 on:
-  workflow_dispatch:           # 允许手动触发
+  workflow_dispatch:
     inputs:
       tag:
-        description: 'Image tag (e.g., 1.6.4)'
+        description: "Image tag to build (for example, 1.8.0)"
         required: true
-        default: 'latest'
+        default: "1.8.0"
+        type: string
+      promote_latest:
+        description: "Also update latest after validation"
+        required: false
+        default: false
+        type: boolean
   push:
-    tags: ['v*']               # 打 v 开头的 tag 自动触发
+    tags: ["v*"]
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -37,14 +46,30 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Determine tag
+      - name: Determine image tags
         id: meta
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
-            echo "tag=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+            tag="${GITHUB_REF#refs/tags/v}"
           else
-            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+            tag="${{ inputs.tag }}"
           fi
+          if [ -z "$tag" ]; then
+            echo "Image tag is empty" >&2
+            exit 1
+          fi
+          {
+            echo "tag=$tag"
+            echo "tags<<EOF"
+            echo "$DOCKERHUB_USERNAME/mineru-runpod:$tag"
+            if [ "${{ inputs.promote_latest }}" = "true" ]; then
+              echo "$DOCKERHUB_USERNAME/mineru-runpod:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v5
@@ -52,7 +77,6 @@ jobs:
           context: .
           push: true
           provenance: false
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/mineru-runpod:${{ steps.meta.outputs.tag }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/mineru-runpod:latest
-          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/mineru-runpod:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/mineru-runpod:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/mineru-runpod:buildcache,mode=max

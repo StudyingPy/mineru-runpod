@@ -1,6 +1,6 @@
 {
-  "title": "MinerU PDF Parser",
-  "description": "Convert PDFs, images, and Office documents into clean Markdown and structured JSON using MinerU's vision-language model.",
+  "title": "MinerU Document Parser",
+  "description": "Convert PDFs, images, and Office documents into clean Markdown and structured JSON using MinerU 3.4's vision-language model.",
   "type": "serverless",
   "category": "language",
   "iconUrl": "https://raw.githubusercontent.com/sergeyshmakov/mineru-runpod/main/.runpod/icon.png",
@@ -9,7 +9,10 @@
     "containerDiskInGb": 50,
     "gpuCount": 1,
     "gpuIds": "ADA_24,AMPERE_24,AMPERE_48",
-    "allowedCudaVersions": ["13.0", "12.9"],
+    "allowedCudaVersions": [
+      "13.0",
+      "12.9"
+    ],
     "env": [
       {
         "key": "HF_TOKEN",
@@ -28,9 +31,18 @@
           "description": "Where MinerU pulls weights from. Use Hugging Face by default, ModelScope for a faster mirror in China, or Local for offline setups.",
           "default": "huggingface",
           "options": [
-            { "label": "HuggingFace (default)", "value": "huggingface" },
-            { "label": "ModelScope (faster in China)", "value": "modelscope" },
-            { "label": "Local (advanced — needs mineru.json)", "value": "local" }
+            {
+              "label": "HuggingFace (default)",
+              "value": "huggingface"
+            },
+            {
+              "label": "ModelScope (faster in China)",
+              "value": "modelscope"
+            },
+            {
+              "label": "Local (advanced — needs mineru.json)",
+              "value": "local"
+            }
           ],
           "advanced": true
         }
@@ -116,6 +128,76 @@
         }
       },
       {
+        "key": "MINERU_MAX_PAGES_PER_JOB",
+        "input": {
+          "name": "Max pages per job",
+          "type": "string",
+          "description": "Largest page range one job may request. 0 (default) means no ceiling. Applies to explicit ranges only, not full-document parses.",
+          "default": "0",
+          "advanced": true
+        }
+      },
+      {
+        "key": "MINERU_VOLUME_ROOTS",
+        "input": {
+          "name": "Input roots for volume_path",
+          "type": "string",
+          "description": "Comma-separated absolute paths a volume_path input may live under. Empty uses /runpod-volume, /workspace, /worker and /tmp.",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "MINERU_ENFORCE_TARGET_POLICY",
+        "input": {
+          "name": "Require an allow-list for server_url",
+          "type": "string",
+          "description": "Set to 1 if untrusted callers submit jobs. Every server_url host, public included, must then be listed in MINERU_ALLOWED_SERVER_HOSTS -- fill that in too or http-client jobs are refused.",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "MINERU_ALLOWED_SERVER_HOSTS",
+        "input": {
+          "name": "Hosts server_url may name",
+          "type": "string",
+          "description": "Comma-separated, exact host match (e.g. your own vLLM server). Required for every permitted host, not only private ones, when the allow-list is enforced above. Ignored otherwise.",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "MINERU_ALLOW_LOCAL_FETCH",
+        "input": {
+          "name": "Allow non-routable file_url targets",
+          "type": "string",
+          "description": "Set to 1 when file_url points at a host inside your own network. Default requires a publicly routable address.",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "MINERU_DISABLE_PROBE",
+        "input": {
+          "name": "Disable the probe response",
+          "type": "string",
+          "description": "Set to 1 so probe:true jobs return an error instead of the worker's filesystem and model-cache layout. On by default; any value except 0/false/no/off disables it.",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "BUCKET_PRESIGN_TTL_SECONDS",
+        "input": {
+          "name": "Presigned output URL lifetime",
+          "type": "string",
+          "description": "Seconds a transport='s3' output URL stays valid. Default 3600. Clamped to 60-604800; unparseable values fall back to the default.",
+          "default": "3600",
+          "advanced": true
+        }
+      },
+      {
         "key": "LOG_FORMAT",
         "input": {
           "name": "Worker log format",
@@ -123,8 +205,14 @@
           "description": "Worker log output format. JSON is easier to filter in dashboards; text is human-readable for local development.",
           "default": "json",
           "options": [
-            { "label": "JSON (default)", "value": "json" },
-            { "label": "Text (human-readable)", "value": "text" }
+            {
+              "label": "JSON (default)",
+              "value": "json"
+            },
+            {
+              "label": "Text (human-readable)",
+              "value": "text"
+            }
           ],
           "advanced": true
         }
@@ -202,9 +290,29 @@
       {
         "key": "OTEL_EXPORTER_OTLP_HEADERS",
         "input": {
-          "name": "OTLP headers for traces+logs",
+          "name": "Default OTLP headers",
           "type": "string",
-          "description": "Headers sent with traces+logs requests. CSV of key=value pairs. Example for Axiom: Authorization=Bearer xat-...,X-AXIOM-DATASET=my-events",
+          "description": "Default headers sent with OTLP requests. CSV of key=value pairs. Per-signal values below override this setting.",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+        "input": {
+          "name": "OTLP headers for traces",
+          "type": "string",
+          "description": "Override headers for trace export. Axiom requires a dedicated Events dataset for traces.",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+        "input": {
+          "name": "OTLP headers for logs",
+          "type": "string",
+          "description": "Override headers for log export. Axiom requires a dedicated Events dataset for logs.",
           "default": "",
           "advanced": true
         }
@@ -216,20 +324,6 @@
           "type": "string",
           "description": "Override headers for metrics export only. Set when your backend uses a separate metrics dataset (e.g. Axiom's x-axiom-metrics-dataset).",
           "default": "",
-          "advanced": true
-        }
-      },
-      {
-        "key": "OTEL_EXPORTER_OTLP_PROTOCOL",
-        "input": {
-          "name": "OTLP transport",
-          "type": "string",
-          "description": "OTLP transport. http/protobuf is widely supported and required by Axiom metrics. Use http/json only if your backend lacks protobuf.",
-          "default": "http/protobuf",
-          "options": [
-            { "label": "http/protobuf (default)", "value": "http/protobuf" },
-            { "label": "http/json", "value": "http/json" }
-          ],
           "advanced": true
         }
       },
